@@ -1,0 +1,16 @@
+{
+  "C_Cpp.default.compilerPath": "/usr/bin/gcc",
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/rv32emu/compile_commands.json",
+  "C_Cpp.default.includePath": [
+    "${workspaceFolder}/rv32emu/include",
+    "${workspaceFolder}/rv32emu/src",
+    "${workspaceFolder}/rv32emu/tests",
+    "${workspaceFolder}/rv32emu/tools"
+  ],
+  "C_Cpp.default.cppStandard": "c++17",
+  "C_Cpp.default.cStandard": "c11",
+  "C_Cpp.default.intelliSenseMode": "linux-gcc-x64",
+  "files.associations": {
+    "*.h": "c"
+  }
+}

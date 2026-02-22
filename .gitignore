@@ -19,7 +19,10 @@
 !/docker/**
 !/rv32emu/
 !/rv32emu/**
+!/.vscode/
+!/.vscode/**
 /out/
-
+.cache/
 # rv32emu local build artifacts
 rv32emu/build/
+compile_commands.json

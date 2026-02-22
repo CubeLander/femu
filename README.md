@@ -22,6 +22,7 @@ To support migration into a clean RV32 Linux emulator repository, this repo now 
 
 * `issues/0001-comprehensive-report.md` - integrated technical report
 * `docs/migration/` - dependency matrix + new-repo bootstrap guide
+* `docs/emulator/` - implementation plan for self-hosted emulator bring-up
 * `docker/Dockerfile.dev` - containerized development environment
 * `scripts/` - automated build/takeaway scripts
 
@@ -41,6 +42,11 @@ make build-all
 make bootstrap
 make smoke-qemu
 make smoke-qemu-strict
+make smoke-emulator
+make smoke-emulator-strict
+make check-boot-contract
+make rv32emu-test
+make rv32emu-bin
 make takeaway
 ```
 

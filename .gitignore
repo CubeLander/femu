@@ -20,3 +20,6 @@
 !/rv32emu/
 !/rv32emu/**
 /out/
+
+# rv32emu local build artifacts
+rv32emu/build/

@@ -60,7 +60,12 @@ enum {
 
 /* CSR numbers */
 enum {
+  CSR_FFLAGS = 0x001,
+  CSR_FRM = 0x002,
+  CSR_FCSR = 0x003,
+
   CSR_SSTATUS = 0x100,
+  CSR_SCOUNTEREN = 0x106,
   CSR_SIE = 0x104,
   CSR_STVEC = 0x105,
   CSR_SSCRATCH = 0x140,
@@ -72,6 +77,7 @@ enum {
 
   CSR_MSTATUS = 0x300,
   CSR_MISA = 0x301,
+  CSR_MCOUNTEREN = 0x306,
   CSR_MEDELEG = 0x302,
   CSR_MIDELEG = 0x303,
   CSR_MIE = 0x304,
@@ -85,6 +91,9 @@ enum {
   CSR_CYCLE = 0xc00,
   CSR_TIME = 0xc01,
   CSR_INSTRET = 0xc02,
+  CSR_CYCLEH = 0xc80,
+  CSR_TIMEH = 0xc81,
+  CSR_INSTRETH = 0xc82,
 
   CSR_MVENDORID = 0xf11,
   CSR_MARCHID = 0xf12,
@@ -98,10 +107,22 @@ enum {
   MSTATUS_SPIE = (1u << 5),
   MSTATUS_MPIE = (1u << 7),
   MSTATUS_SPP = (1u << 8),
+  MSTATUS_FS_SHIFT = 13,
+  MSTATUS_FS_MASK = (3u << MSTATUS_FS_SHIFT),
+  MSTATUS_MPRV = (1u << 17),
   MSTATUS_MPP_SHIFT = 11,
   MSTATUS_MPP_MASK = (3u << MSTATUS_MPP_SHIFT),
   MSTATUS_SUM = (1u << 18),
   MSTATUS_MXR = (1u << 19),
+};
+
+enum {
+  MIP_SSIP = (1u << RV32EMU_IRQ_SSIP),
+  MIP_MSIP = (1u << RV32EMU_IRQ_MSIP),
+  MIP_STIP = (1u << RV32EMU_IRQ_STIP),
+  MIP_MTIP = (1u << RV32EMU_IRQ_MTIP),
+  MIP_SEIP = (1u << RV32EMU_IRQ_SEIP),
+  MIP_MEIP = (1u << RV32EMU_IRQ_MEIP),
 };
 
 enum {
@@ -138,12 +159,19 @@ typedef struct {
 
   uint64_t mtime;
   uint64_t mtimecmp;
+  uint32_t clint_msip;
 
   uint32_t plic_claim;
+  uint32_t plic_pending;
+  uint32_t plic_enable0;
+  uint32_t plic_enable1;
+
+  uint8_t uart_regs[8];
 } rv32emu_platform_t;
 
 typedef struct {
   uint32_t x[32];
+  uint64_t f[32];
   uint32_t pc;
   uint64_t cycle;
   uint64_t instret;

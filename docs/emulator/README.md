@@ -1,0 +1,17 @@
+# Emulator 文档索引
+
+- 总实施计划：`docs/emulator/opensbi-linux-rootfs-implementation-plan.md`
+- Phase-1 Boot Contract：`docs/emulator/boot-contract.md`
+- QEMU 基线复盘：`docs/qemu-smoke/rv32-qemu-smoke-retrospective.md`
+- 成功日志样例：`docs/logs/2026-02-22-qemu-smoke-success.log`
+- Emulator 第一轮日志：`docs/logs/2026-02-22-emulator-smoke-round1.log`
+- Emulator 第二轮日志：`docs/logs/2026-02-22-emulator-smoke-round2.log`
+- Emulator strict pass 日志：`docs/logs/2026-02-22-emulator-smoke-strict-pass.log`
+
+Quick checks:
+
+- `make check-boot-contract`
+- `make rv32emu-test`
+- `make rv32emu-bin`
+- `make smoke-emulator`
+- `make smoke-emulator-strict`

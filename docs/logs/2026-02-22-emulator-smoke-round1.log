@@ -1,0 +1,7 @@
+[INFO] rv32emu boot start
+[INFO] opensbi=/workspace/out/opensbi/platform/generic/firmware/fw_dynamic.bin @0x80000000 entry=0x80000000
+[INFO] kernel=/workspace/out/linux/arch/riscv/boot/Image @0x80400000 entry=0x80400000
+[INFO] dtb=/workspace/out/smoke/virt-rv32-smoke.dtb @0x87f00000
+[INFO] initrd=/workspace/out/rootfs/initramfs.cpio.gz @0x88000000 size=1297474
+[INFO] fw_dynamic_info @0x803ff000 next=0x80400000 mode=S
+[INFO] rv32emu stop: executed=3 running=0 pc=0x00000000 priv=3 mcause=0x00000002 mepc=0x8000000c mtval=0x08332d91

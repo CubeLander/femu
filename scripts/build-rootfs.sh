@@ -20,17 +20,32 @@ if [[ ! -x "${BUSYBOX_BIN}" ]]; then
   exit 1
 fi
 
-mkdir -p "${ROOTFS_DIR}"/{bin,sbin,etc,proc,sys,dev,etc/init.d}
+BUSYBOX_OUT="${BUSYBOX_OUT:-$(dirname "${BUSYBOX_BIN}")}"
+BUSYBOX_LINKS="${BUSYBOX_LINKS:-${BUSYBOX_OUT}/busybox.links}"
+
+if [[ ! -f "${BUSYBOX_LINKS}" ]]; then
+  echo "[ERR] busybox applet list missing: ${BUSYBOX_LINKS}" >&2
+  echo "      run ./scripts/build-busybox.sh first." >&2
+  exit 1
+fi
+
+rm -rf "${ROOTFS_DIR}"
+mkdir -p "${ROOTFS_DIR}"
+
+mkdir -p "${ROOTFS_DIR}/bin"
 cp -f "${BUSYBOX_BIN}" "${ROOTFS_DIR}/bin/busybox"
 chmod +x "${ROOTFS_DIR}/bin/busybox"
 
-# BusyBox applet links
-(
-  cd "${ROOTFS_DIR}/bin"
-  ./busybox --list | while IFS= read -r app; do
-    ln -sf busybox "${app}"
-  done
-)
+echo "[INFO] creating busybox applet links from ${BUSYBOX_LINKS}"
+while IFS= read -r app; do
+  [[ -z "${app}" ]] && continue
+  app_rel="${app#/}"
+  app_path="${ROOTFS_DIR}/${app_rel}"
+  mkdir -p "$(dirname "${app_path}")"
+  ln -sf /bin/busybox "${app_path}"
+done < "${BUSYBOX_LINKS}"
+
+mkdir -p "${ROOTFS_DIR}"/{etc,proc,sys,dev,etc/init.d}
 
 ln -sf bin/busybox "${ROOTFS_DIR}/init"
 

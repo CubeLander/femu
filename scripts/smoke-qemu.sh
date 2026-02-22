@@ -107,5 +107,16 @@ if grep -Eq "Kernel panic - not syncing|No working init found" "${LOG_PATH}"; th
   fi
 fi
 
+if grep -Eq "error -8" "${LOG_PATH}"; then
+  if [[ "${ALLOW_INIT_PANIC}" == "1" ]]; then
+    echo "[WARN] executable format error detected (error -8)."
+    echo "[WARN] initramfs userspace is likely wrong arch for rv32 kernel."
+  else
+    echo "[ERR] executable format error detected (error -8)." >&2
+    tail -n 120 "${LOG_PATH}" >&2 || true
+    exit 1
+  fi
+fi
+
 echo "[OK] qemu smoke test passed"
 tail -n 40 "${LOG_PATH}" || true

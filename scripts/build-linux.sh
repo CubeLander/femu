@@ -57,18 +57,24 @@ if [[ "${CONFIG_NEEDS_INIT}" == "1" ]]; then
 
   echo "[INFO] generating base config: ${DEFCONFIG_TARGET}"
   make -C "${LINUX_SRC}" O="${OUT_DIR}" ARCH="${ARCH_NAME}" CROSS_COMPILE="${CROSS_PREFIX}" "${DEFCONFIG_TARGET}"
+fi
 
-  if [[ -f "${CONFIG_FRAGMENT}" ]]; then
-    echo "[INFO] merging rv32 minimal fragment"
-    "${LINUX_SRC}/scripts/kconfig/merge_config.sh" -m -O "${OUT_DIR}" \
-      "${OUT_DIR}/.config" "${CONFIG_FRAGMENT}"
-    make -C "${LINUX_SRC}" O="${OUT_DIR}" ARCH="${ARCH_NAME}" CROSS_COMPILE="${CROSS_PREFIX}" olddefconfig
-  fi
+if [[ -f "${CONFIG_FRAGMENT}" ]]; then
+  echo "[INFO] merging rv32 minimal fragment"
+  "${LINUX_SRC}/scripts/kconfig/merge_config.sh" -m -O "${OUT_DIR}" \
+    "${OUT_DIR}/.config" "${CONFIG_FRAGMENT}"
+  make -C "${LINUX_SRC}" O="${OUT_DIR}" ARCH="${ARCH_NAME}" CROSS_COMPILE="${CROSS_PREFIX}" olddefconfig
 fi
 
 if ! grep -q "^CONFIG_32BIT=y" "${OUT_DIR}/.config"; then
   echo "[ERR] kernel config is not rv32 (CONFIG_32BIT!=y)." >&2
   echo "      remove ${OUT_DIR} and rebuild, or set BASE_DEFCONFIG=rv32_defconfig." >&2
+  exit 1
+fi
+
+if ! grep -q "^CONFIG_FPU=y" "${OUT_DIR}/.config"; then
+  echo "[ERR] kernel config has CONFIG_FPU disabled." >&2
+  echo "      rv32 ilp32d userspace (busybox/toolchain) needs FPU support enabled." >&2
   exit 1
 fi
 

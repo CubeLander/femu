@@ -7,6 +7,7 @@ OUT_DIR="${OUT_DIR:-${ROOT_DIR}/out/busybox}"
 JOBS="${JOBS:-$(nproc)}"
 ARCH_NAME="${ARCH_NAME:-riscv}"
 CROSS_PREFIX="${CROSS_COMPILE:-}"
+REQUIRE_RV32="${REQUIRE_RV32:-0}"
 
 run_kconfig_noninteractive() {
   set +o pipefail
@@ -17,6 +18,26 @@ run_kconfig_noninteractive() {
 }
 
 detect_cross_prefix() {
+  if [[ -n "${RV32_CROSS_COMPILE:-}" ]] && command -v "${RV32_CROSS_COMPILE}gcc" >/dev/null 2>&1; then
+    CROSS_PREFIX="${RV32_CROSS_COMPILE}"
+    return 0
+  fi
+
+  if [[ -x "${ROOT_DIR}/opt/toolchains/riscv32-ilp32d--glibc--stable-2025.08-1/bin/riscv32-linux-gcc" ]]; then
+    CROSS_PREFIX="${ROOT_DIR}/opt/toolchains/riscv32-ilp32d--glibc--stable-2025.08-1/bin/riscv32-linux-"
+    return 0
+  fi
+
+  if command -v riscv32-linux-gcc >/dev/null 2>&1; then
+    CROSS_PREFIX="riscv32-linux-"
+    return 0
+  fi
+
+  if command -v riscv32-buildroot-linux-gnu-gcc >/dev/null 2>&1; then
+    CROSS_PREFIX="riscv32-buildroot-linux-gnu-"
+    return 0
+  fi
+
   if [[ -n "${CROSS_PREFIX}" ]]; then
     return 0
   fi
@@ -79,9 +100,15 @@ fi
 
 BB_DESC="$(file -b "${OUT_DIR}/busybox")"
 if echo "${BB_DESC}" | grep -qi "64-bit"; then
-  echo "[WARN] busybox output is 64-bit: ${OUT_DIR}/busybox"
-  echo "      rv32 smoke will reach kernel but fail at init handoff."
-  echo "      use an rv32-capable userspace toolchain if you need strict pass."
+  if [[ "${REQUIRE_RV32}" == "1" ]]; then
+    echo "[ERR] busybox output is 64-bit but REQUIRE_RV32=1: ${OUT_DIR}/busybox" >&2
+    echo "      install rv32 toolchain and rebuild." >&2
+    exit 1
+  else
+    echo "[WARN] busybox output is 64-bit: ${OUT_DIR}/busybox"
+    echo "      rv32 smoke will reach kernel but fail at init handoff."
+    echo "      use an rv32-capable userspace toolchain if you need strict pass."
+  fi
 fi
 
 echo "[OK] busybox binary: ${OUT_DIR}/busybox"

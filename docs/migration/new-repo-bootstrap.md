@@ -41,6 +41,7 @@ Inside container:
 
 ```bash
 ./scripts/fetch-sources.sh
+./scripts/install-rv32-toolchain.sh
 ./scripts/build-busybox.sh
 ./scripts/build-linux.sh
 ./scripts/build-opensbi.sh
@@ -52,6 +53,13 @@ If cross compiler is missing:
 
 ```bash
 ./scripts/build-toolchain.sh
+```
+
+For strict rv32 smoke:
+
+```bash
+RV32_CROSS_COMPILE="$(pwd)/opt/toolchains/riscv32-ilp32d--glibc--stable-2025.08-1/bin/riscv32-linux-" REQUIRE_RV32=1 ./scripts/build-busybox.sh
+ALLOW_INIT_PANIC=0 ./scripts/smoke-qemu.sh
 ```
 
 ## 5. Add emulator clean-room project

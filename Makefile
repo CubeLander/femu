@@ -30,8 +30,14 @@ fetch-sources:
 build-toolchain:
 	./scripts/build-toolchain.sh
 
+install-rv32-toolchain:
+	./scripts/install-rv32-toolchain.sh
+
 build-busybox:
 	./scripts/build-busybox.sh
+
+build-busybox-rv32: install-rv32-toolchain
+	CROSS_COMPILE="$(PWD)/opt/toolchains/riscv32-ilp32d--glibc--stable-2025.08-1/bin/riscv32-linux-" REQUIRE_RV32=1 ./scripts/build-busybox.sh
 
 build-linux:
 	./scripts/build-linux.sh
@@ -44,6 +50,9 @@ build-rootfs:
 
 smoke-qemu: build-linux build-opensbi build-rootfs
 	./scripts/smoke-qemu.sh
+
+smoke-qemu-strict: build-linux build-opensbi build-busybox-rv32 build-rootfs
+	ALLOW_INIT_PANIC=0 ./scripts/smoke-qemu.sh
 
 dump-dtb:
 	./scripts/dump-virt-dtb.sh out/virt-rv32.dtb
@@ -60,4 +69,4 @@ bootstrap: build-toolchain fetch-sources build-busybox build-linux build-opensbi
 build-all: build-busybox build-linux build-opensbi build-rootfs
 	@echo "[OK] all build artifacts are ready under out/"
 
-.PHONY: default clean submit info setup password dev-shell fetch-sources build-toolchain build-busybox build-linux build-opensbi build-rootfs smoke-qemu dump-dtb takeaway check-env bootstrap build-all
+.PHONY: default clean submit info setup password dev-shell fetch-sources build-toolchain install-rv32-toolchain build-busybox build-busybox-rv32 build-linux build-opensbi build-rootfs smoke-qemu smoke-qemu-strict dump-dtb takeaway check-env bootstrap build-all

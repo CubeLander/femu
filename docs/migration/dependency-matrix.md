@@ -6,7 +6,7 @@
 | Cross toolchain | GCC/Binutils for RISC-V | `riscv64-linux-gnu-*` (or compatible) | `apt` in dev container | First choice for speed |
 | Linux kernel | `linux/` source + config fragment | `out/linux/arch/riscv/boot/Image` | `scripts/fetch-sources.sh` + `scripts/build-linux.sh` | RV32 minimal fragment included |
 | OpenSBI | `opensbi/` source | `out/opensbi/fw_dynamic.bin` | `scripts/fetch-sources.sh` + `scripts/build-opensbi.sh` | `PLATFORM=generic`, XLEN=32 |
-| BusyBox/rootfs | `busybox` binary/source | `out/rootfs/initramfs.cpio.gz` | `scripts/fetch-sources.sh` + `scripts/build-busybox.sh` + `scripts/build-rootfs.sh` | Uses `fakeroot`, no host root required |
+| BusyBox/rootfs | `busybox` binary/source | `out/rootfs/initramfs.cpio.gz` | `scripts/install-rv32-toolchain.sh` + `scripts/fetch-sources.sh` + `scripts/build-busybox.sh` + `scripts/build-rootfs.sh` | For strict smoke, BusyBox should be rv32 userspace |
 | Emulator | new clean-room implementation | emulator binary | new repo `emulator/` | Keep isolated from legacy NEMU |
 
 ## Host-level dependencies (minimum)

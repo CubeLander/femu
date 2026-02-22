@@ -31,13 +31,16 @@ Quick entry points:
 make dev-shell
 make fetch-sources
 make build-toolchain
+make install-rv32-toolchain
 make build-busybox
+make build-busybox-rv32
 make build-linux
 make build-opensbi
 make build-rootfs
 make build-all
 make bootstrap
 make smoke-qemu
+make smoke-qemu-strict
 make takeaway
 ```
 
@@ -57,6 +60,14 @@ Strict mode (fail on kernel panic after init handoff):
 
 ```bash
 ALLOW_INIT_PANIC=0 make smoke-qemu
+```
+
+Recommended rv32 end-to-end smoke:
+
+```bash
+make install-rv32-toolchain
+make build-busybox-rv32
+make smoke-qemu-strict
 ```
 
 If cross compiler is missing, run:

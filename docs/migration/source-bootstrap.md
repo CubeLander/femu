@@ -58,6 +58,7 @@ TOOLCHAIN_MODE=source ./scripts/build-toolchain.sh
 ## 3. Build artifacts
 
 ```bash
+./scripts/install-rv32-toolchain.sh
 ./scripts/build-busybox.sh
 ./scripts/build-linux.sh
 ./scripts/build-opensbi.sh
@@ -68,6 +69,13 @@ TOOLCHAIN_MODE=source ./scripts/build-toolchain.sh
 Strict mode:
 
 ```bash
+ALLOW_INIT_PANIC=0 ./scripts/smoke-qemu.sh
+```
+
+Strict rv32 mode (recommended):
+
+```bash
+RV32_CROSS_COMPILE="$(pwd)/opt/toolchains/riscv32-ilp32d--glibc--stable-2025.08-1/bin/riscv32-linux-" REQUIRE_RV32=1 ./scripts/build-busybox.sh
 ALLOW_INIT_PANIC=0 ./scripts/smoke-qemu.sh
 ```
 
@@ -84,10 +92,13 @@ Outputs:
 ```bash
 make fetch-sources
 make build-toolchain
+make install-rv32-toolchain
 make build-busybox
+make build-busybox-rv32
 make build-all
 make bootstrap
 make smoke-qemu
+make smoke-qemu-strict
 ```
 
 `make bootstrap` runs toolchain check/setup, source sync, and baseline builds end-to-end.

@@ -24,6 +24,33 @@ int main(void) {
 
   assert(rv32emu_phys_read(&m, RV32EMU_UART_BASE + 5u, 1, &value));
   assert((value & 0x60u) == 0x60u);
+  assert((value & 0x01u) == 0u);
+
+  assert(rv32emu_uart_push_rx(&m, 'A'));
+  assert(rv32emu_phys_read(&m, RV32EMU_UART_BASE + 5u, 1, &value));
+  assert((value & 0x01u) != 0u);
+  assert(rv32emu_phys_read(&m, RV32EMU_UART_BASE + 0u, 1, &value));
+  assert((value & 0xffu) == 'A');
+  assert(rv32emu_phys_read(&m, RV32EMU_UART_BASE + 5u, 1, &value));
+  assert((value & 0x01u) == 0u);
+
+  assert(rv32emu_phys_write(&m, RV32EMU_PLIC_BASE + 0x2080u, 4, (1u << 10)));
+  assert(rv32emu_phys_write(&m, RV32EMU_UART_BASE + 1u, 1, 2u));
+  assert((rv32emu_csr_read(&m, CSR_MIP) & MIP_SEIP) != 0u);
+  assert(rv32emu_phys_read(&m, RV32EMU_UART_BASE + 2u, 1, &value));
+  assert((value & 0x0fu) == 0x02u);
+  assert(rv32emu_phys_read(&m, RV32EMU_PLIC_BASE + 0x201004u, 4, &value));
+  assert(value == 10u);
+  assert(rv32emu_phys_write(&m, RV32EMU_PLIC_BASE + 0x201004u, 4, 10u));
+
+  assert(rv32emu_phys_write(&m, RV32EMU_UART_BASE + 1u, 1, 1u));
+  assert(rv32emu_uart_push_rx(&m, 'B'));
+  assert((rv32emu_csr_read(&m, CSR_MIP) & MIP_SEIP) != 0u);
+  assert(rv32emu_phys_read(&m, RV32EMU_PLIC_BASE + 0x201004u, 4, &value));
+  assert(value == 10u);
+  assert(rv32emu_phys_write(&m, RV32EMU_PLIC_BASE + 0x201004u, 4, 10u));
+  assert(rv32emu_phys_read(&m, RV32EMU_UART_BASE + 0u, 1, &value));
+  assert((value & 0xffu) == 'B');
 
   assert(rv32emu_phys_write(&m, RV32EMU_CLINT_BASE + 0x4000u, 4, 3u));
   assert(rv32emu_phys_write(&m, RV32EMU_CLINT_BASE + 0x4004u, 4, 0u));

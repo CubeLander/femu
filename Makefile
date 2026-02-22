@@ -78,10 +78,13 @@ smoke-emulator: rv32emu-bin build-linux build-opensbi build-busybox-rv32 build-r
 smoke-emulator-strict: rv32emu-bin build-linux build-opensbi build-busybox-rv32 build-rootfs
 	ALLOW_INIT_PANIC=0 ./scripts/smoke-emulator.sh
 
+smoke-emulator-interactive: rv32emu-bin build-linux build-opensbi build-busybox-rv32 build-rootfs
+	./scripts/smoke-emulator-interactive.sh
+
 bootstrap: build-toolchain fetch-sources build-busybox build-linux build-opensbi build-rootfs
 	@echo "[OK] bootstrap artifacts are ready under out/"
 
 build-all: build-busybox build-linux build-opensbi build-rootfs
 	@echo "[OK] all build artifacts are ready under out/"
 
-.PHONY: default clean submit info setup password dev-shell fetch-sources build-toolchain install-rv32-toolchain build-busybox build-busybox-rv32 build-linux build-opensbi build-rootfs smoke-qemu smoke-qemu-strict dump-dtb takeaway check-env check-boot-contract rv32emu-test rv32emu-bin smoke-emulator smoke-emulator-strict bootstrap build-all
+.PHONY: default clean submit info setup password dev-shell fetch-sources build-toolchain install-rv32-toolchain build-busybox build-busybox-rv32 build-linux build-opensbi build-rootfs smoke-qemu smoke-qemu-strict dump-dtb takeaway check-env check-boot-contract rv32emu-test rv32emu-bin smoke-emulator smoke-emulator-strict smoke-emulator-interactive bootstrap build-all

@@ -44,6 +44,7 @@ make smoke-qemu
 make smoke-qemu-strict
 make smoke-emulator
 make smoke-emulator-strict
+make smoke-emulator-interactive
 make check-boot-contract
 make rv32emu-test
 make rv32emu-bin

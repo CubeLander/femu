@@ -19,7 +19,7 @@ DTB_LOAD="${DTB_LOAD:-0x87f00000}"
 INITRD_LOAD="${INITRD_LOAD:-0x88000000}"
 
 AUTO_DUMP_DTB="${AUTO_DUMP_DTB:-1}"
-EXPECTED_CMDLINE='console=ttyS0 earlycon=sbi rdinit=/bin/sh'
+EXPECTED_CMDLINE='console=ttyS0 earlycon=sbi rdinit=/init'
 
 round_up() {
   local value="$1"

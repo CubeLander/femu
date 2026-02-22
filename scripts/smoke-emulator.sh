@@ -7,7 +7,7 @@ EMU_BIN="${EMU_BIN:-${ROOT_DIR}/rv32emu/build/rv32emu}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-90}"
 MEMORY_MB="${MEMORY_MB:-256}"
 MAX_INSTR="${MAX_INSTR:-1200000000}"
-APPEND="${APPEND:-console=ttyS0 earlycon=sbi rdinit=/bin/sh}"
+APPEND="${APPEND:-console=ttyS0 earlycon=sbi rdinit=/init}"
 ALLOW_INIT_PANIC="${ALLOW_INIT_PANIC:-1}"
 CPU_ISA="${CPU_ISA:-rv32imafdc_zicsr_zifencei}"
 

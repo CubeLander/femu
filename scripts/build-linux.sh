@@ -81,7 +81,7 @@ fi
 echo "[INFO] kernel config confirms rv32"
 if [[ -f "${CONFIG_FRAGMENT}" ]]; then
   # Informative check so users can spot command-line drift early.
-  if ! grep -q '^CONFIG_CMDLINE="console=ttyS0 earlycon=sbi rdinit=/bin/sh"' "${OUT_DIR}/.config"; then
+  if ! grep -q '^CONFIG_CMDLINE="console=ttyS0 earlycon=sbi rdinit=/init"' "${OUT_DIR}/.config"; then
     echo "[WARN] CONFIG_CMDLINE differs from expected minimal fragment."
   fi
 fi

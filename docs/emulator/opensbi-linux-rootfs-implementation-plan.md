@@ -27,7 +27,7 @@
 ### 阶段 A：启动契约冻结（Boot Contract）
 要做的事：
 1. 固化内存映射与加载地址（DRAM/UART/CLINT/PLIC、kernel/dtb/initrd）。
-2. 固化启动参数（`console=ttyS0 earlycon=sbi rdinit=/bin/sh`）。
+2. 固化启动参数（`console=ttyS0 earlycon=sbi rdinit=/init`）。
 3. 定义镜像加载顺序、入口点、寄存器约定（`a0=hartid`，`a1=dtb`）。
 
 验收：
@@ -141,7 +141,7 @@
    - `make smoke-emulator`
    - `make smoke-emulator-strict`
 4. 第二轮 smoke 结果（已推进到 strict pass）：
-   - 关键 marker：`OpenSBI banner`、`Linux version`、`Kernel command line`、`Run /bin/sh as init process` 均可命中。
+   - 关键 marker：`OpenSBI banner`、`Linux version`、`Kernel command line`、`Run /init as init process` 均可命中。
    - 参考日志：
      - `docs/logs/2026-02-22-emulator-smoke-round2.log`
      - `docs/logs/2026-02-22-emulator-smoke-strict-pass.log`
@@ -163,7 +163,7 @@
 ## 4. 推荐里程碑
 1. M1：OpenSBI banner 出现。
 2. M2：Linux banner + cmdline 出现。
-3. M3：`Run /bin/sh as init process`。
+3. M3：`Run /init as init process`。
 4. M4：strict smoke pass（进入 `~ #`）。
 
 ## 5. 多核问题：是否现在就做？

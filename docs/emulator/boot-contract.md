@@ -38,13 +38,13 @@ Linux 接管时：
 默认命令行：
 
 ```text
-console=ttyS0 earlycon=sbi rdinit=/bin/sh
+console=ttyS0 earlycon=sbi rdinit=/init
 ```
 
 对应内核配置关键项：
 - `CONFIG_32BIT=y`
 - `CONFIG_FPU=y`（当前 userspace 为 `ilp32d`）
-- `CONFIG_CMDLINE="console=ttyS0 earlycon=sbi rdinit=/bin/sh"`
+- `CONFIG_CMDLINE="console=ttyS0 earlycon=sbi rdinit=/init"`
 
 ## 6. 自动校验
 使用以下命令验证契约：

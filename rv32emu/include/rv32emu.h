@@ -19,6 +19,7 @@
 #define RV32EMU_DEFAULT_DTB_LOAD 0x87f00000u
 #define RV32EMU_DEFAULT_INITRD_LOAD 0x88000000u
 #define RV32EMU_DEFAULT_MAX_INSTR (50000000ull)
+#define RV32EMU_UART_RX_FIFO_SIZE 256u
 
 typedef enum {
   RV32EMU_PRIV_U = 0,
@@ -167,6 +168,11 @@ typedef struct {
   uint32_t plic_enable1;
 
   uint8_t uart_regs[8];
+  uint8_t uart_rx_fifo[RV32EMU_UART_RX_FIFO_SIZE];
+  uint16_t uart_rx_head;
+  uint16_t uart_rx_tail;
+  uint16_t uart_rx_count;
+  bool uart_tx_irq_pending;
 } rv32emu_platform_t;
 
 typedef struct {
@@ -201,6 +207,7 @@ uint8_t *rv32emu_dram_ptr(rv32emu_machine_t *m, uint32_t paddr, size_t len);
 
 bool rv32emu_phys_read(rv32emu_machine_t *m, uint32_t paddr, int len, uint32_t *out);
 bool rv32emu_phys_write(rv32emu_machine_t *m, uint32_t paddr, int len, uint32_t data);
+bool rv32emu_uart_push_rx(rv32emu_machine_t *m, uint8_t data);
 
 void rv32emu_step_timer(rv32emu_machine_t *m);
 

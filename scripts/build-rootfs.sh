@@ -51,7 +51,7 @@ ln -sf bin/busybox "${ROOTFS_DIR}/init"
 
 cat > "${ROOTFS_DIR}/etc/inittab" <<'INITTAB'
 ::sysinit:/etc/init.d/rcS
-console::respawn:/bin/sh
+::respawn:/bin/cttyhack /bin/sh
 INITTAB
 
 cat > "${ROOTFS_DIR}/etc/init.d/rcS" <<'RCS'

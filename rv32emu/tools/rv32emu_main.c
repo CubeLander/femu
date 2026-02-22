@@ -1,14 +1,19 @@
 #include "rv32emu.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <termios.h>
+#include <unistd.h>
 
 #define FW_DYNAMIC_INFO_MAGIC_VALUE 0x4942534fu
 #define FW_DYNAMIC_INFO_VERSION_2 0x2u
 #define FW_DYNAMIC_INFO_NEXT_MODE_S 0x1u
 #define FW_DYNAMIC_INFO_NEXT_MODE_M 0x3u
+#define RV32EMU_RUN_SLICE_INSTR 20000ull
 
 typedef struct {
   const char *opensbi_path;
@@ -26,6 +31,7 @@ typedef struct {
   bool trace;
   bool boot_s_mode;
   bool use_fw_dynamic;
+  bool interactive;
 } cli_options_t;
 
 static void usage(FILE *out, const char *prog) {
@@ -44,6 +50,7 @@ static void usage(FILE *out, const char *prog) {
           "  --boot-mode <s|m>           OpenSBI next mode (default s)\n"
           "  --memory-mb <num>           RAM size in MiB (default 256)\n"
           "  --max-instr <num>           Max instructions (default 50000000)\n"
+          "  --interactive               Enable stdin -> UART interactive mode\n"
           "  --trace                     Enable trace flag\n"
           "  -h, --help                  Show this help\n",
           prog);
@@ -132,6 +139,10 @@ static bool parse_args(int argc, char **argv, cli_options_t *cli) {
       cli->trace = true;
       continue;
     }
+    if (!strcmp(arg, "--interactive")) {
+      cli->interactive = true;
+      continue;
+    }
     if (!strcmp(arg, "--no-fw-dynamic")) {
       cli->use_fw_dynamic = false;
       continue;
@@ -218,6 +229,125 @@ static bool parse_args(int argc, char **argv, cli_options_t *cli) {
   return true;
 }
 
+typedef struct {
+  bool enabled;
+  bool has_saved_flags;
+  bool has_saved_termios;
+  int saved_flags;
+  struct termios saved_termios;
+} stdin_mode_t;
+
+static bool rv32emu_setup_stdin_mode(stdin_mode_t *mode, bool interactive) {
+  int flags;
+
+  if (mode == NULL) {
+    return false;
+  }
+
+  memset(mode, 0, sizeof(*mode));
+  if (!interactive) {
+    return true;
+  }
+
+  flags = fcntl(STDIN_FILENO, F_GETFL);
+  if (flags < 0) {
+    perror("[WARN] stdin F_GETFL failed");
+    return false;
+  }
+  mode->saved_flags = flags;
+  mode->has_saved_flags = true;
+  if (fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK) < 0) {
+    perror("[WARN] stdin F_SETFL(O_NONBLOCK) failed");
+    return false;
+  }
+
+  if (isatty(STDIN_FILENO)) {
+    struct termios raw;
+
+    if (tcgetattr(STDIN_FILENO, &mode->saved_termios) == 0) {
+      raw = mode->saved_termios;
+      mode->has_saved_termios = true;
+      raw.c_iflag &= (tcflag_t) ~(ICRNL | IXON);
+      raw.c_lflag &= (tcflag_t) ~(ICANON | ECHO);
+      raw.c_cc[VMIN] = 0;
+      raw.c_cc[VTIME] = 0;
+      if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) {
+        perror("[WARN] stdin tcsetattr(raw) failed");
+      }
+    } else {
+      perror("[WARN] stdin tcgetattr failed");
+    }
+  }
+
+  mode->enabled = true;
+  return true;
+}
+
+static void rv32emu_restore_stdin_mode(const stdin_mode_t *mode) {
+  if (mode == NULL || !mode->enabled) {
+    return;
+  }
+
+  if (mode->has_saved_termios) {
+    (void)tcsetattr(STDIN_FILENO, TCSANOW, &mode->saved_termios);
+  }
+  if (mode->has_saved_flags) {
+    (void)fcntl(STDIN_FILENO, F_SETFL, mode->saved_flags);
+  }
+}
+
+static void rv32emu_pump_stdin_to_uart(rv32emu_machine_t *m) {
+  ssize_t nread;
+  uint8_t ch;
+
+  if (m == NULL) {
+    return;
+  }
+
+  for (;;) {
+    if (m->plat.uart_rx_count >= RV32EMU_UART_RX_FIFO_SIZE) {
+      return;
+    }
+
+    nread = read(STDIN_FILENO, &ch, 1);
+    if (nread == 1) {
+      (void)rv32emu_uart_push_rx(m, ch);
+      continue;
+    }
+    if (nread == 0) {
+      return;
+    }
+    if (errno == EINTR) {
+      continue;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return;
+    }
+    return;
+  }
+}
+
+static uint64_t rv32emu_run_interactive(rv32emu_machine_t *m, uint64_t max_instructions) {
+  uint64_t executed = 0;
+
+  while (m->cpu.running && executed < max_instructions) {
+    uint64_t remaining = max_instructions - executed;
+    uint64_t slice = remaining > RV32EMU_RUN_SLICE_INSTR ? RV32EMU_RUN_SLICE_INSTR : remaining;
+    int delta;
+
+    rv32emu_pump_stdin_to_uart(m);
+    delta = rv32emu_run(m, slice);
+    if (delta < 0) {
+      break;
+    }
+
+    executed += (uint64_t)delta;
+    rv32emu_pump_stdin_to_uart(m);
+  }
+
+  return executed;
+}
+
 int main(int argc, char **argv) {
   cli_options_t cli;
   rv32emu_machine_t m;
@@ -227,10 +357,11 @@ int main(int argc, char **argv) {
   bool opensbi_entry_valid = false;
   bool kernel_entry_valid = false;
   uint32_t initrd_size = 0;
-  int executed;
+  uint64_t executed = 0;
   uint32_t mcause;
   uint32_t mtval;
   uint32_t mepc;
+  stdin_mode_t stdin_mode;
 
   if (!parse_args(argc, argv, &cli)) {
     usage(stderr, argv[0]);
@@ -318,13 +449,25 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[INFO] fw_dynamic_info disabled\n");
   }
 
-  executed = rv32emu_run(&m, cli.max_instructions);
+  if (!rv32emu_setup_stdin_mode(&stdin_mode, cli.interactive)) {
+    fprintf(stderr, "[ERR] failed to configure interactive stdin mode\n");
+    rv32emu_platform_destroy(&m);
+    return 1;
+  }
+
+  if (cli.interactive) {
+    executed = rv32emu_run_interactive(&m, cli.max_instructions);
+  } else {
+    executed = (uint64_t)rv32emu_run(&m, cli.max_instructions);
+  }
+
+  rv32emu_restore_stdin_mode(&stdin_mode);
   mcause = rv32emu_csr_read(&m, CSR_MCAUSE);
   mtval = rv32emu_csr_read(&m, CSR_MTVAL);
   mepc = rv32emu_csr_read(&m, CSR_MEPC);
 
   fprintf(stderr,
-          "[INFO] rv32emu stop: executed=%d running=%d pc=0x%08x priv=%u mcause=0x%08x "
+          "[INFO] rv32emu stop: executed=%" PRIu64 " running=%d pc=0x%08x priv=%u mcause=0x%08x "
           "mepc=0x%08x mtval=0x%08x\n",
           executed, m.cpu.running ? 1 : 0, m.cpu.pc, (unsigned)m.cpu.priv, mcause, mepc,
           mtval);

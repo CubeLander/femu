@@ -13,8 +13,15 @@
 #define UART_REG_MSR 0x06u
 #define UART_REG_SCR 0x07u
 
+#define UART_IER_RDI (1u << 0)
+#define UART_IER_THRI (1u << 1)
+#define UART_IIR_NO_INT 0x01u
+#define UART_IIR_THRI 0x02u
+#define UART_IIR_RDI 0x04u
+#define UART_LSR_DR (1u << 0)
 #define UART_LSR_THRE (1u << 5)
 #define UART_LSR_TEMT (1u << 6)
+#define UART_PLIC_IRQ 10u
 
 #define CLINT_MSIP 0x0000u
 #define CLINT_MTIMECMP 0x4000u
@@ -72,6 +79,98 @@ static bool rv32emu_write_u32_le(uint8_t *p, int len, uint32_t data) {
   return false;
 }
 
+static void rv32emu_update_plic_irq_lines(rv32emu_machine_t *m) {
+  uint32_t pending_m = m->plat.plic_pending & m->plat.plic_enable0;
+  uint32_t pending_s = m->plat.plic_pending & m->plat.plic_enable1;
+
+  if (pending_m != 0u) {
+    m->cpu.csr[CSR_MIP] |= MIP_MEIP;
+  } else {
+    m->cpu.csr[CSR_MIP] &= ~MIP_MEIP;
+  }
+
+  if (pending_s != 0u) {
+    m->cpu.csr[CSR_MIP] |= MIP_SEIP;
+  } else {
+    m->cpu.csr[CSR_MIP] &= ~MIP_SEIP;
+  }
+}
+
+static bool rv32emu_uart_irq_should_assert(const rv32emu_machine_t *m) {
+  return m->plat.uart_rx_count != 0u && (m->plat.uart_regs[UART_REG_IER] & UART_IER_RDI) != 0u;
+}
+
+static bool rv32emu_uart_tx_irq_should_assert(const rv32emu_machine_t *m) {
+  return m->plat.uart_tx_irq_pending &&
+         (m->plat.uart_regs[UART_REG_IER] & UART_IER_THRI) != 0u;
+}
+
+static void rv32emu_uart_sync_irq(rv32emu_machine_t *m) {
+  uint32_t uart_bit = 1u << UART_PLIC_IRQ;
+
+  if (rv32emu_uart_irq_should_assert(m) || rv32emu_uart_tx_irq_should_assert(m)) {
+    m->plat.plic_pending |= uart_bit;
+  } else {
+    m->plat.plic_pending &= ~uart_bit;
+  }
+  rv32emu_update_plic_irq_lines(m);
+}
+
+static bool rv32emu_uart_pop_rx(rv32emu_machine_t *m, uint8_t *out) {
+  if (m->plat.uart_rx_count == 0u) {
+    return false;
+  }
+
+  *out = m->plat.uart_rx_fifo[m->plat.uart_rx_head];
+  m->plat.uart_rx_head = (uint16_t)((m->plat.uart_rx_head + 1u) % RV32EMU_UART_RX_FIFO_SIZE);
+  m->plat.uart_rx_count--;
+  return true;
+}
+
+bool rv32emu_uart_push_rx(rv32emu_machine_t *m, uint8_t data) {
+  if (m == NULL || m->plat.uart_rx_count >= RV32EMU_UART_RX_FIFO_SIZE) {
+    return false;
+  }
+
+  m->plat.uart_rx_fifo[m->plat.uart_rx_tail] = data;
+  m->plat.uart_rx_tail = (uint16_t)((m->plat.uart_rx_tail + 1u) % RV32EMU_UART_RX_FIFO_SIZE);
+  m->plat.uart_rx_count++;
+  rv32emu_uart_sync_irq(m);
+  return true;
+}
+
+static uint32_t rv32emu_plic_find_claimable(uint32_t pending, uint32_t enabled) {
+  uint32_t active = pending & enabled;
+  uint32_t irq;
+
+  for (irq = 1u; irq < 32u; irq++) {
+    if ((active & (1u << irq)) != 0u) {
+      return irq;
+    }
+  }
+
+  return 0u;
+}
+
+static uint32_t rv32emu_plic_claim(rv32emu_machine_t *m, bool s_context) {
+  uint32_t enabled;
+  uint32_t claim;
+
+  if (m->plat.plic_claim != 0u) {
+    return m->plat.plic_claim;
+  }
+
+  enabled = s_context ? m->plat.plic_enable1 : m->plat.plic_enable0;
+  claim = rv32emu_plic_find_claimable(m->plat.plic_pending, enabled);
+  if (claim != 0u) {
+    m->plat.plic_claim = claim;
+    m->plat.plic_pending &= ~(1u << claim);
+    rv32emu_update_plic_irq_lines(m);
+  }
+
+  return m->plat.plic_claim;
+}
+
 static bool rv32emu_handle_uart_read(rv32emu_machine_t *m, uint32_t paddr, int len,
                                      uint32_t *out) {
   uint32_t off = paddr - RV32EMU_UART_BASE;
@@ -89,14 +188,30 @@ static bool rv32emu_handle_uart_read(rv32emu_machine_t *m, uint32_t paddr, int l
   idx = (uint8_t)(off & 0x7u);
 
   switch (idx) {
-  case UART_REG_RBR:
-    value = 0;
+  case UART_REG_RBR: {
+    uint8_t ch = 0;
+    if (rv32emu_uart_pop_rx(m, &ch)) {
+      value = ch;
+      rv32emu_uart_sync_irq(m);
+    } else {
+      value = 0u;
+    }
     break;
+  }
   case UART_REG_IIR:
-    value = 0x01u;
+    if (rv32emu_uart_irq_should_assert(m)) {
+      value = UART_IIR_RDI;
+    } else if (rv32emu_uart_tx_irq_should_assert(m)) {
+      value = UART_IIR_THRI;
+    } else {
+      value = UART_IIR_NO_INT;
+    }
     break;
   case UART_REG_LSR:
     value = UART_LSR_THRE | UART_LSR_TEMT;
+    if (m->plat.uart_rx_count != 0u) {
+      value |= UART_LSR_DR;
+    }
     break;
   case UART_REG_MSR:
     value = 0;
@@ -130,9 +245,28 @@ static bool rv32emu_handle_uart_write(rv32emu_machine_t *m, uint32_t paddr, int 
   case UART_REG_THR:
     putchar((int)ch);
     fflush(stdout);
+    if ((m->plat.uart_regs[UART_REG_IER] & UART_IER_THRI) != 0u) {
+      m->plat.uart_tx_irq_pending = true;
+      rv32emu_uart_sync_irq(m);
+    }
+    break;
+  case UART_REG_IER:
+    m->plat.uart_regs[UART_REG_IER] = ch;
+    if ((ch & UART_IER_THRI) != 0u) {
+      m->plat.uart_tx_irq_pending = true;
+    } else {
+      m->plat.uart_tx_irq_pending = false;
+    }
+    rv32emu_uart_sync_irq(m);
     break;
   case UART_REG_FCR:
     m->plat.uart_regs[UART_REG_FCR] = ch;
+    if ((ch & 0x02u) != 0u) {
+      m->plat.uart_rx_head = 0u;
+      m->plat.uart_rx_tail = 0u;
+      m->plat.uart_rx_count = 0u;
+    }
+    rv32emu_uart_sync_irq(m);
     break;
   default:
     m->plat.uart_regs[idx] = ch;
@@ -240,8 +374,10 @@ static bool rv32emu_handle_plic_read(rv32emu_machine_t *m, uint32_t paddr, int l
     *out = m->plat.plic_enable1;
     return true;
   case PLIC_CTX0_CLAIM:
+    *out = rv32emu_plic_claim(m, false);
+    return true;
   case PLIC_CTX1_CLAIM:
-    *out = m->plat.plic_claim;
+    *out = rv32emu_plic_claim(m, true);
     return true;
   default:
     *out = 0;
@@ -264,17 +400,23 @@ static bool rv32emu_handle_plic_write(rv32emu_machine_t *m, uint32_t paddr, int 
   switch (off) {
   case PLIC_PENDING:
     m->plat.plic_pending = data;
+    rv32emu_uart_sync_irq(m);
     return true;
   case PLIC_ENABLE0:
     m->plat.plic_enable0 = data;
+    rv32emu_update_plic_irq_lines(m);
     return true;
   case PLIC_ENABLE1:
     m->plat.plic_enable1 = data;
+    rv32emu_update_plic_irq_lines(m);
     return true;
   case PLIC_CTX0_CLAIM:
   case PLIC_CTX1_CLAIM:
     if (data == m->plat.plic_claim) {
       m->plat.plic_claim = 0;
+      rv32emu_uart_sync_irq(m);
+    } else {
+      rv32emu_update_plic_irq_lines(m);
     }
     return true;
   default:

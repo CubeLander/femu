@@ -7,7 +7,7 @@ QEMU_BIN="${QEMU_BIN:-qemu-system-riscv32}"
 MACHINE="${MACHINE:-virt}"
 MEMORY_MB="${MEMORY_MB:-256}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-20}"
-APPEND="${APPEND:-console=ttyS0 earlycon=sbi rdinit=/bin/sh}"
+APPEND="${APPEND:-console=ttyS0 earlycon=sbi rdinit=/init}"
 ALLOW_INIT_PANIC="${ALLOW_INIT_PANIC:-1}"
 
 KERNEL_IMAGE="${KERNEL_IMAGE:-${ROOT_DIR}/out/linux/arch/riscv/boot/Image}"

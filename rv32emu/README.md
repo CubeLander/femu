@@ -33,4 +33,16 @@ Build emulator runner:
 make -C rv32emu rv32emu
 ```
 
+Interactive UART console (stdin -> UART RX):
+
+```bash
+./rv32emu/build/rv32emu \
+  --opensbi out/opensbi/platform/generic/firmware/fw_dynamic.bin \
+  --kernel out/linux/arch/riscv/boot/Image \
+  --dtb out/smoke/virt-rv32-smoke.dtb \
+  --initrd out/rootfs/initramfs.cpio.gz \
+  --interactive \
+  --max-instr 1200000000
+```
+
 See `issues/0001-comprehensive-report.md` and `docs/migration/` for migration details.

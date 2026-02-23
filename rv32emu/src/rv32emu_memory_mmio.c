@@ -81,6 +81,96 @@ static bool rv32emu_write_u32_le(uint8_t *p, int len, uint32_t data) {
   return false;
 }
 
+/*
+ * Threaded DRAM access path:
+ * - aligned halfword/word use single relaxed atomic operation (fast path);
+ * - unaligned accesses fall back to byte-granular relaxed atomics (slow path).
+ *
+ * This keeps host-side accesses race-free in experimental threaded mode while
+ * preserving existing unaligned behavior (byte-assembled load/store).
+ */
+static bool rv32emu_read_u32_le_atomic(const uint8_t *p, uint32_t paddr, int len, uint32_t *out) {
+  if (len == 1) {
+    *out = (uint32_t)__atomic_load_n(&p[0], __ATOMIC_RELAXED);
+    return true;
+  }
+  if (len == 2) {
+    uint32_t b0;
+    uint32_t b1;
+
+    if ((paddr & 1u) == 0u) {
+      const uint16_t *p16 = (const uint16_t *)(const void *)p;
+      *out = (uint32_t)__atomic_load_n(p16, __ATOMIC_RELAXED);
+      return true;
+    }
+
+    b0 = (uint32_t)__atomic_load_n(&p[0], __ATOMIC_RELAXED);
+    b1 = (uint32_t)__atomic_load_n(&p[1], __ATOMIC_RELAXED);
+    *out = b0 | (b1 << 8);
+    return true;
+  }
+  if (len == 4) {
+    uint32_t b0;
+    uint32_t b1;
+    uint32_t b2;
+    uint32_t b3;
+
+    if ((paddr & 3u) == 0u) {
+      const uint32_t *p32 = (const uint32_t *)(const void *)p;
+      *out = __atomic_load_n(p32, __ATOMIC_RELAXED);
+      return true;
+    }
+
+    b0 = (uint32_t)__atomic_load_n(&p[0], __ATOMIC_RELAXED);
+    b1 = (uint32_t)__atomic_load_n(&p[1], __ATOMIC_RELAXED);
+    b2 = (uint32_t)__atomic_load_n(&p[2], __ATOMIC_RELAXED);
+    b3 = (uint32_t)__atomic_load_n(&p[3], __ATOMIC_RELAXED);
+    *out = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    return true;
+  }
+  return false;
+}
+
+static bool rv32emu_write_u32_le_atomic(uint8_t *p, uint32_t paddr, int len, uint32_t data) {
+  if (len == 1) {
+    __atomic_store_n(&p[0], (uint8_t)data, __ATOMIC_RELAXED);
+    return true;
+  }
+  if (len == 2) {
+    if ((paddr & 1u) == 0u) {
+      uint16_t *p16 = (uint16_t *)(void *)p;
+      __atomic_store_n(p16, (uint16_t)data, __ATOMIC_RELAXED);
+      return true;
+    }
+
+    __atomic_store_n(&p[0], (uint8_t)data, __ATOMIC_RELAXED);
+    __atomic_store_n(&p[1], (uint8_t)(data >> 8), __ATOMIC_RELAXED);
+    return true;
+  }
+  if (len == 4) {
+    if ((paddr & 3u) == 0u) {
+      uint32_t *p32 = (uint32_t *)(void *)p;
+      __atomic_store_n(p32, data, __ATOMIC_RELAXED);
+      return true;
+    }
+
+    __atomic_store_n(&p[0], (uint8_t)data, __ATOMIC_RELAXED);
+    __atomic_store_n(&p[1], (uint8_t)(data >> 8), __ATOMIC_RELAXED);
+    __atomic_store_n(&p[2], (uint8_t)(data >> 16), __ATOMIC_RELAXED);
+    __atomic_store_n(&p[3], (uint8_t)(data >> 24), __ATOMIC_RELAXED);
+    return true;
+  }
+  return false;
+}
+
+static inline void rv32emu_dram_atomic_stat_inc(rv32emu_machine_t *m,
+                                                atomic_uint_fast64_t *counter) {
+  if (m == NULL || counter == NULL || !m->plat.dram_atomic_stats_enable) {
+    return;
+  }
+  atomic_fetch_add_explicit(counter, 1u, memory_order_relaxed);
+}
+
 static uint32_t rv32emu_plic_context_count(const rv32emu_machine_t *m) {
   if (m == NULL || m->hart_count > RV32EMU_MAX_HARTS) {
     return 0u;
@@ -91,6 +181,7 @@ static uint32_t rv32emu_plic_context_count(const rv32emu_machine_t *m) {
 static void rv32emu_sync_timer_irq_for_hart(rv32emu_machine_t *m, uint32_t hartid) {
   rv32emu_cpu_t *cpu;
   bool expired;
+  uint64_t mtime;
 
   if (m == NULL || hartid >= m->hart_count) {
     return;
@@ -101,21 +192,22 @@ static void rv32emu_sync_timer_irq_for_hart(rv32emu_machine_t *m, uint32_t harti
     return;
   }
 
-  expired = m->plat.mtime >= m->plat.clint_mtimecmp[hartid];
+  mtime = atomic_load_explicit(&m->plat.mtime, memory_order_relaxed);
+  expired = mtime >= m->plat.clint_mtimecmp[hartid];
   if (m->opts.enable_sbi_shim) {
     if (expired) {
-      cpu->csr[CSR_MIP] |= MIP_STIP;
+      rv32emu_cpu_mip_set_bits(cpu, MIP_STIP);
     } else {
-      cpu->csr[CSR_MIP] &= ~MIP_STIP;
+      rv32emu_cpu_mip_clear_bits(cpu, MIP_STIP);
     }
-    cpu->csr[CSR_MIP] &= ~MIP_MTIP;
+    rv32emu_cpu_mip_clear_bits(cpu, MIP_MTIP);
     return;
   }
 
   if (expired) {
-    cpu->csr[CSR_MIP] |= MIP_MTIP;
+    rv32emu_cpu_mip_set_bits(cpu, MIP_MTIP);
   } else {
-    cpu->csr[CSR_MIP] &= ~MIP_MTIP;
+    rv32emu_cpu_mip_clear_bits(cpu, MIP_MTIP);
   }
 }
 
@@ -127,10 +219,6 @@ static void rv32emu_sync_all_timer_irqs(rv32emu_machine_t *m) {
   }
 
   for (hart = 0u; hart < m->hart_count; hart++) {
-    rv32emu_cpu_t *cpu = rv32emu_hart_cpu(m, hart);
-    if (cpu != NULL) {
-      cpu->csr[CSR_TIME] = (uint32_t)m->plat.mtime;
-    }
     rv32emu_sync_timer_irq_for_hart(m, hart);
   }
   rv32emu_timer_refresh_deadline(m);
@@ -158,15 +246,15 @@ static void rv32emu_update_plic_irq_lines(rv32emu_machine_t *m) {
     pending_s = m->plat.plic_pending & m->plat.plic_enable[s_context];
 
     if (pending_m != 0u) {
-      cpu->csr[CSR_MIP] |= MIP_MEIP;
+      rv32emu_cpu_mip_set_bits(cpu, MIP_MEIP);
     } else {
-      cpu->csr[CSR_MIP] &= ~MIP_MEIP;
+      rv32emu_cpu_mip_clear_bits(cpu, MIP_MEIP);
     }
 
     if (pending_s != 0u) {
-      cpu->csr[CSR_MIP] |= MIP_SEIP;
+      rv32emu_cpu_mip_set_bits(cpu, MIP_SEIP);
     } else {
-      cpu->csr[CSR_MIP] &= ~MIP_SEIP;
+      rv32emu_cpu_mip_clear_bits(cpu, MIP_SEIP);
     }
   }
 }
@@ -394,10 +482,10 @@ static bool rv32emu_handle_clint_read(rv32emu_machine_t *m, uint32_t paddr, int 
 
   switch (off) {
   case CLINT_MTIME:
-    *out = (uint32_t)(m->plat.mtime & 0xffffffffu);
+    *out = (uint32_t)(atomic_load_explicit(&m->plat.mtime, memory_order_relaxed) & 0xffffffffu);
     return true;
   case CLINT_MTIME + 4:
-    *out = (uint32_t)(m->plat.mtime >> 32);
+    *out = (uint32_t)(atomic_load_explicit(&m->plat.mtime, memory_order_relaxed) >> 32);
     return true;
   default:
     *out = 0;
@@ -435,13 +523,14 @@ static bool rv32emu_handle_clint_write(rv32emu_machine_t *m, uint32_t paddr, int
        * HARTs into warmboot. If a hart has not started yet, treat MSIP=1 as
        * its wakeup event.
        */
-      if (m->plat.clint_msip[hart] != 0u && !cpu->running) {
-        cpu->running = true;
+      if (m->plat.clint_msip[hart] != 0u &&
+          !atomic_load_explicit(&cpu->running, memory_order_acquire)) {
+        atomic_store_explicit(&cpu->running, true, memory_order_release);
       }
       if (m->plat.clint_msip[hart] != 0u) {
-        cpu->csr[CSR_MIP] |= MIP_MSIP;
+        rv32emu_cpu_mip_set_bits(cpu, MIP_MSIP);
       } else {
-        cpu->csr[CSR_MIP] &= ~MIP_MSIP;
+        rv32emu_cpu_mip_clear_bits(cpu, MIP_MSIP);
       }
     }
     return true;
@@ -467,12 +556,26 @@ static bool rv32emu_handle_clint_write(rv32emu_machine_t *m, uint32_t paddr, int
   }
 
   switch (off) {
-  case CLINT_MTIME:
-    m->plat.mtime = (m->plat.mtime & 0xffffffff00000000ull) | (uint64_t)data;
+  case CLINT_MTIME: {
+    uint64_t old_mtime;
+    uint64_t new_mtime;
+    do {
+      old_mtime = atomic_load_explicit(&m->plat.mtime, memory_order_relaxed);
+      new_mtime = (old_mtime & 0xffffffff00000000ull) | (uint64_t)data;
+    } while (!atomic_compare_exchange_weak_explicit(
+        &m->plat.mtime, &old_mtime, new_mtime, memory_order_relaxed, memory_order_relaxed));
     break;
-  case CLINT_MTIME + 4:
-    m->plat.mtime = (m->plat.mtime & 0x00000000ffffffffull) | ((uint64_t)data << 32);
+  }
+  case CLINT_MTIME + 4: {
+    uint64_t old_mtime;
+    uint64_t new_mtime;
+    do {
+      old_mtime = atomic_load_explicit(&m->plat.mtime, memory_order_relaxed);
+      new_mtime = (old_mtime & 0x00000000ffffffffull) | ((uint64_t)data << 32);
+    } while (!atomic_compare_exchange_weak_explicit(
+        &m->plat.mtime, &old_mtime, new_mtime, memory_order_relaxed, memory_order_relaxed));
     break;
+  }
   default:
     return true;
   }
@@ -596,20 +699,19 @@ static bool rv32emu_handle_plic_write(rv32emu_machine_t *m, uint32_t paddr, int 
   return true;
 }
 
-void rv32emu_step_timer(rv32emu_machine_t *m) {
-  rv32emu_cpu_t *cpu;
+static void rv32emu_timer_sync_if_due(rv32emu_machine_t *m, uint64_t mtime) {
+  uint64_t deadline;
 
   if (m == NULL) {
     return;
   }
 
-  m->plat.mtime += 1;
-  cpu = RV32EMU_CPU(m);
-  if (cpu != NULL) {
-    cpu->csr[CSR_TIME] = (uint32_t)m->plat.mtime;
+  deadline = atomic_load_explicit(&m->plat.next_timer_deadline, memory_order_relaxed);
+  if (mtime < deadline) {
+    return;
   }
 
-  if (m->plat.mtime < m->plat.next_timer_deadline) {
+  if (pthread_mutex_lock(&m->plat.mmio_lock) != 0) {
     return;
   }
 
@@ -618,7 +720,26 @@ void rv32emu_step_timer(rv32emu_machine_t *m) {
    * resynchronize all harts' timer pending bits and compute the following
    * deadline. This removes the per-instruction O(hart_count) scan.
    */
-  rv32emu_sync_all_timer_irqs(m);
+  if (mtime >= atomic_load_explicit(&m->plat.next_timer_deadline, memory_order_relaxed)) {
+    rv32emu_sync_all_timer_irqs(m);
+  }
+
+  (void)pthread_mutex_unlock(&m->plat.mmio_lock);
+}
+
+void rv32emu_step_timer(rv32emu_machine_t *m) {
+  uint64_t mtime;
+
+  if (m == NULL) {
+    return;
+  }
+
+  mtime = atomic_fetch_add_explicit(&m->plat.mtime, 1u, memory_order_relaxed) + 1u;
+  rv32emu_timer_sync_if_due(m, mtime);
+}
+
+void rv32emu_flush_timer(rv32emu_machine_t *m) {
+  (void)m;
 }
 
 static bool rv32emu_handle_virtio_mmio_read(rv32emu_machine_t *m, uint32_t paddr, int len,
@@ -686,6 +807,7 @@ uint8_t *rv32emu_dram_ptr(rv32emu_machine_t *m, uint32_t paddr, size_t len) {
 
 bool rv32emu_phys_read(rv32emu_machine_t *m, uint32_t paddr, int len, uint32_t *out) {
   uint8_t *ptr;
+  bool ok;
 
   if (m == NULL || out == NULL) {
     return false;
@@ -693,30 +815,58 @@ bool rv32emu_phys_read(rv32emu_machine_t *m, uint32_t paddr, int len, uint32_t *
 
   ptr = rv32emu_dram_ptr(m, paddr, (size_t)len);
   if (ptr != NULL) {
-    return rv32emu_read_u32_le(ptr, len, out);
+    if (m->threaded_exec_active) {
+      if (len == 4 && (paddr & 3u) == 0u) {
+        rv32emu_dram_atomic_stat_inc(m, &m->plat.dram_atomic_read_aligned32);
+      } else if (len == 2 && (paddr & 1u) == 0u) {
+        rv32emu_dram_atomic_stat_inc(m, &m->plat.dram_atomic_read_aligned16);
+      } else {
+        rv32emu_dram_atomic_stat_inc(m, &m->plat.dram_atomic_read_bytepath);
+      }
+      return rv32emu_read_u32_le_atomic(ptr, paddr, len, out);
+    }
+    if (pthread_mutex_lock(&m->plat.dram_lock) != 0) {
+      return false;
+    }
+    ok = rv32emu_read_u32_le(ptr, len, out);
+    (void)pthread_mutex_unlock(&m->plat.dram_lock);
+    return ok;
   }
 
+  if (pthread_mutex_lock(&m->plat.mmio_lock) != 0) {
+    return false;
+  }
   if (paddr >= RV32EMU_UART_BASE && paddr < RV32EMU_UART_BASE + RV32EMU_UART_SIZE) {
-    return rv32emu_handle_uart_read(m, paddr, len, out);
+    ok = rv32emu_handle_uart_read(m, paddr, len, out);
+    (void)pthread_mutex_unlock(&m->plat.mmio_lock);
+    return ok;
   }
 
   if (paddr >= RV32EMU_CLINT_BASE && paddr < RV32EMU_CLINT_BASE + RV32EMU_CLINT_SIZE) {
-    return rv32emu_handle_clint_read(m, paddr, len, out);
+    ok = rv32emu_handle_clint_read(m, paddr, len, out);
+    (void)pthread_mutex_unlock(&m->plat.mmio_lock);
+    return ok;
   }
 
   if (paddr >= RV32EMU_PLIC_BASE && paddr < RV32EMU_PLIC_BASE + RV32EMU_PLIC_SIZE) {
-    return rv32emu_handle_plic_read(m, paddr, len, out);
+    ok = rv32emu_handle_plic_read(m, paddr, len, out);
+    (void)pthread_mutex_unlock(&m->plat.mmio_lock);
+    return ok;
   }
 
   if (paddr >= VIRTIO_MMIO_BASE && paddr < VIRTIO_MMIO_BASE + VIRTIO_MMIO_SIZE) {
-    return rv32emu_handle_virtio_mmio_read(m, paddr, len, out);
+    ok = rv32emu_handle_virtio_mmio_read(m, paddr, len, out);
+    (void)pthread_mutex_unlock(&m->plat.mmio_lock);
+    return ok;
   }
 
+  (void)pthread_mutex_unlock(&m->plat.mmio_lock);
   return false;
 }
 
 bool rv32emu_phys_write(rv32emu_machine_t *m, uint32_t paddr, int len, uint32_t data) {
   uint8_t *ptr;
+  bool ok;
 
   if (m == NULL) {
     return false;
@@ -724,24 +874,51 @@ bool rv32emu_phys_write(rv32emu_machine_t *m, uint32_t paddr, int len, uint32_t 
 
   ptr = rv32emu_dram_ptr(m, paddr, (size_t)len);
   if (ptr != NULL) {
-    return rv32emu_write_u32_le(ptr, len, data);
+    if (m->threaded_exec_active) {
+      if (len == 4 && (paddr & 3u) == 0u) {
+        rv32emu_dram_atomic_stat_inc(m, &m->plat.dram_atomic_write_aligned32);
+      } else if (len == 2 && (paddr & 1u) == 0u) {
+        rv32emu_dram_atomic_stat_inc(m, &m->plat.dram_atomic_write_aligned16);
+      } else {
+        rv32emu_dram_atomic_stat_inc(m, &m->plat.dram_atomic_write_bytepath);
+      }
+      return rv32emu_write_u32_le_atomic(ptr, paddr, len, data);
+    }
+    if (pthread_mutex_lock(&m->plat.dram_lock) != 0) {
+      return false;
+    }
+    ok = rv32emu_write_u32_le(ptr, len, data);
+    (void)pthread_mutex_unlock(&m->plat.dram_lock);
+    return ok;
   }
 
+  if (pthread_mutex_lock(&m->plat.mmio_lock) != 0) {
+    return false;
+  }
   if (paddr >= RV32EMU_UART_BASE && paddr < RV32EMU_UART_BASE + RV32EMU_UART_SIZE) {
-    return rv32emu_handle_uart_write(m, paddr, len, data);
+    ok = rv32emu_handle_uart_write(m, paddr, len, data);
+    (void)pthread_mutex_unlock(&m->plat.mmio_lock);
+    return ok;
   }
 
   if (paddr >= RV32EMU_CLINT_BASE && paddr < RV32EMU_CLINT_BASE + RV32EMU_CLINT_SIZE) {
-    return rv32emu_handle_clint_write(m, paddr, len, data);
+    ok = rv32emu_handle_clint_write(m, paddr, len, data);
+    (void)pthread_mutex_unlock(&m->plat.mmio_lock);
+    return ok;
   }
 
   if (paddr >= RV32EMU_PLIC_BASE && paddr < RV32EMU_PLIC_BASE + RV32EMU_PLIC_SIZE) {
-    return rv32emu_handle_plic_write(m, paddr, len, data);
+    ok = rv32emu_handle_plic_write(m, paddr, len, data);
+    (void)pthread_mutex_unlock(&m->plat.mmio_lock);
+    return ok;
   }
 
   if (paddr >= VIRTIO_MMIO_BASE && paddr < VIRTIO_MMIO_BASE + VIRTIO_MMIO_SIZE) {
-    return rv32emu_handle_virtio_mmio_write(m, paddr, len, data);
+    ok = rv32emu_handle_virtio_mmio_write(m, paddr, len, data);
+    (void)pthread_mutex_unlock(&m->plat.mmio_lock);
+    return ok;
   }
 
+  (void)pthread_mutex_unlock(&m->plat.mmio_lock);
   return false;
 }

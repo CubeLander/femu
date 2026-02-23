@@ -111,19 +111,19 @@ static void test_sbi_shim_handle_and_ecall(void) {
   assert(m.cpu.x[11] == 1u);
 
   m.plat.mtime = 100u;
-  m.cpu.csr[CSR_MIP] = MIP_STIP | MIP_MTIP;
+  rv32emu_cpu_mip_store(&m.cpu, MIP_STIP | MIP_MTIP);
   m.cpu.x[17] = SBI_EXT_TIME;
   m.cpu.x[16] = 0;
   m.cpu.x[10] = 120u;
   m.cpu.x[11] = 0u;
   assert(rv32emu_handle_sbi_ecall(&m));
   assert(m.plat.clint_mtimecmp[0] == 120u);
-  assert((m.cpu.csr[CSR_MIP] & (MIP_STIP | MIP_MTIP)) == 0u);
+  assert((rv32emu_cpu_mip_load(&m.cpu) & (MIP_STIP | MIP_MTIP)) == 0u);
   for (uint32_t i = 0; i < 20; i++) {
     rv32emu_step_timer(&m);
   }
-  assert((m.cpu.csr[CSR_MIP] & MIP_STIP) != 0u);
-  assert((m.cpu.csr[CSR_MIP] & MIP_MTIP) == 0u);
+  assert((rv32emu_cpu_mip_load(&m.cpu) & MIP_STIP) != 0u);
+  assert((rv32emu_cpu_mip_load(&m.cpu) & MIP_MTIP) == 0u);
 
   m.cpu.x[17] = SBI_EXT_LEGACY_SET_TIMER;
   m.cpu.x[10] = 140u;

@@ -94,6 +94,17 @@ static bool parse_u64(const char *s, uint64_t *out) {
   return true;
 }
 
+static bool env_enabled(const char *name) {
+  const char *v;
+
+  if (name == NULL) {
+    return false;
+  }
+
+  v = getenv(name);
+  return v != NULL && v[0] == '1';
+}
+
 static bool write_u32(rv32emu_machine_t *m, uint32_t addr, uint32_t value) {
   return rv32emu_phys_write(m, addr, 4, value);
 }
@@ -379,6 +390,8 @@ int main(int argc, char **argv) {
   uint32_t mtval;
   uint32_t mepc;
   stdin_mode_t stdin_mode;
+  uint64_t dram_atomic_read_total;
+  uint64_t dram_atomic_write_total;
 
   if (!parse_args(argc, argv, &cli)) {
     usage(stderr, argv[0]);
@@ -400,6 +413,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[ERR] platform init failed\n");
     return 1;
   }
+  m.plat.dram_atomic_stats_enable = env_enabled("RV32EMU_DEBUG_DRAM_STATS");
 
   if (!rv32emu_load_image_auto(&m, cli.opensbi_path, cli.opensbi_load_addr, &opensbi_entry,
                                &opensbi_entry_valid)) {
@@ -456,7 +470,8 @@ int main(int argc, char **argv) {
      * When we boot through the built-in SBI shim (no OpenSBI firmware),
      * keep only hart0 running so Linux starts secondaries via hart_start().
      */
-    hart_cpu->running = cli.sbi_shim ? (hart == 0u) : true;
+    atomic_store_explicit(&hart_cpu->running, cli.sbi_shim ? (hart == 0u) : true,
+                          memory_order_relaxed);
     hart_cpu->x[10] = hart; /* a0 = hartid */
     hart_cpu->x[11] = cli.dtb_load_addr; /* a1 = dtb */
     hart_cpu->x[12] = cli.use_fw_dynamic ? cli.fw_dynamic_info_addr : 0u; /* a2 */
@@ -514,6 +529,30 @@ int main(int argc, char **argv) {
             "[INFO] hart%u state: running=%u pc=0x%08x priv=%u mcause=0x%08x mepc=0x%08x\n",
             hart, cpu->running ? 1u : 0u, cpu->pc, (unsigned)cpu->priv, cpu->csr[CSR_MCAUSE],
             cpu->csr[CSR_MEPC]);
+  }
+
+  if (m.plat.dram_atomic_stats_enable) {
+    uint64_t r32 =
+        atomic_load_explicit(&m.plat.dram_atomic_read_aligned32, memory_order_relaxed);
+    uint64_t r16 =
+        atomic_load_explicit(&m.plat.dram_atomic_read_aligned16, memory_order_relaxed);
+    uint64_t rb =
+        atomic_load_explicit(&m.plat.dram_atomic_read_bytepath, memory_order_relaxed);
+    uint64_t w32 =
+        atomic_load_explicit(&m.plat.dram_atomic_write_aligned32, memory_order_relaxed);
+    uint64_t w16 =
+        atomic_load_explicit(&m.plat.dram_atomic_write_aligned16, memory_order_relaxed);
+    uint64_t wb =
+        atomic_load_explicit(&m.plat.dram_atomic_write_bytepath, memory_order_relaxed);
+
+    dram_atomic_read_total = r32 + r16 + rb;
+    dram_atomic_write_total = w32 + w16 + wb;
+    fprintf(stderr,
+            "[INFO] dram atomic stats: read_total=%" PRIu64
+            " (aligned32=%" PRIu64 ", aligned16=%" PRIu64 ", bytepath=%" PRIu64
+            ") write_total=%" PRIu64 " (aligned32=%" PRIu64 ", aligned16=%" PRIu64
+            ", bytepath=%" PRIu64 ")\n",
+            dram_atomic_read_total, r32, r16, rb, dram_atomic_write_total, w32, w16, wb);
   }
 
   if (!rv32emu_any_hart_running(&m) && mcause != RV32EMU_EXC_BREAKPOINT) {

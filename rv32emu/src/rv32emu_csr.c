@@ -64,17 +64,19 @@ uint32_t rv32emu_csr_read(rv32emu_machine_t *m, uint16_t csr_num) {
   case CSR_SIE:
     return RV32EMU_CPU(m)->csr[CSR_MIE] & SIE_MASK;
   case CSR_SIP:
-    return RV32EMU_CPU(m)->csr[CSR_MIP] & SIE_MASK;
+    return rv32emu_cpu_mip_load(RV32EMU_CPU(m)) & SIE_MASK;
+  case CSR_MIP:
+    return rv32emu_cpu_mip_load(RV32EMU_CPU(m));
   case CSR_CYCLE:
     return (uint32_t)RV32EMU_CPU(m)->cycle;
   case CSR_TIME:
-    return (uint32_t)m->plat.mtime;
+    return (uint32_t)atomic_load_explicit(&m->plat.mtime, memory_order_relaxed);
   case CSR_INSTRET:
     return (uint32_t)RV32EMU_CPU(m)->instret;
   case CSR_CYCLEH:
     return (uint32_t)(RV32EMU_CPU(m)->cycle >> 32);
   case CSR_TIMEH:
-    return (uint32_t)(m->plat.mtime >> 32);
+    return (uint32_t)(atomic_load_explicit(&m->plat.mtime, memory_order_relaxed) >> 32);
   case CSR_INSTRETH:
     return (uint32_t)(RV32EMU_CPU(m)->instret >> 32);
   default:
@@ -111,7 +113,12 @@ void rv32emu_csr_write(rv32emu_machine_t *m, uint16_t csr_num, uint32_t value) {
     RV32EMU_CPU(m)->csr[CSR_MIE] = (RV32EMU_CPU(m)->csr[CSR_MIE] & ~SIE_MASK) | (value & SIE_MASK);
     return;
   case CSR_SIP:
-    RV32EMU_CPU(m)->csr[CSR_MIP] = (RV32EMU_CPU(m)->csr[CSR_MIP] & ~SIE_MASK) | (value & SIE_MASK);
+    rv32emu_cpu_mip_store(RV32EMU_CPU(m),
+                          (rv32emu_cpu_mip_load(RV32EMU_CPU(m)) & ~SIE_MASK) |
+                              (value & SIE_MASK));
+    return;
+  case CSR_MIP:
+    rv32emu_cpu_mip_store(RV32EMU_CPU(m), value);
     return;
   case CSR_CYCLE:
   case CSR_TIME:

@@ -2,7 +2,7 @@ CC ?= gcc
 AR ?= ar
 
 CFLAGS ?= -std=c11 -Wall -Wextra -Werror -O2
-CPPFLAGS ?= -Iinclude
+CPPFLAGS ?= -Iinclude -D_POSIX_C_SOURCE=200809L
 THREAD_FLAGS ?= -pthread
 
 BUILD_DIR := build

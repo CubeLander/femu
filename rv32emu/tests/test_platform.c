@@ -85,25 +85,25 @@ int main(void) {
   assert(rv32emu_platform_init(&smp, &opts));
 
   assert(rv32emu_phys_write(&smp, RV32EMU_CLINT_BASE + 0x0004u, 4, 1u));
-  assert((rv32emu_hart_cpu(&smp, 0u)->csr[CSR_MIP] & MIP_MSIP) == 0u);
-  assert((rv32emu_hart_cpu(&smp, 1u)->csr[CSR_MIP] & MIP_MSIP) != 0u);
+  assert((rv32emu_cpu_mip_load(rv32emu_hart_cpu(&smp, 0u)) & MIP_MSIP) == 0u);
+  assert((rv32emu_cpu_mip_load(rv32emu_hart_cpu(&smp, 1u)) & MIP_MSIP) != 0u);
 
   assert(rv32emu_phys_write(&smp, RV32EMU_CLINT_BASE + 0x4008u, 4, 2u));
   assert(rv32emu_phys_write(&smp, RV32EMU_CLINT_BASE + 0x400cu, 4, 0u));
   rv32emu_step_timer(&smp);
-  assert((rv32emu_hart_cpu(&smp, 1u)->csr[CSR_MIP] & MIP_MTIP) == 0u);
+  assert((rv32emu_cpu_mip_load(rv32emu_hart_cpu(&smp, 1u)) & MIP_MTIP) == 0u);
   rv32emu_step_timer(&smp);
-  assert((rv32emu_hart_cpu(&smp, 1u)->csr[CSR_MIP] & MIP_MTIP) != 0u);
-  assert((rv32emu_hart_cpu(&smp, 0u)->csr[CSR_MIP] & MIP_MTIP) == 0u);
+  assert((rv32emu_cpu_mip_load(rv32emu_hart_cpu(&smp, 1u)) & MIP_MTIP) != 0u);
+  assert((rv32emu_cpu_mip_load(rv32emu_hart_cpu(&smp, 0u)) & MIP_MTIP) == 0u);
 
   assert(rv32emu_phys_write(&smp, RV32EMU_PLIC_BASE + 0x2100u, 4, (1u << 5)));
   assert(rv32emu_phys_write(&smp, RV32EMU_PLIC_BASE + 0x1000u, 4, (1u << 5)));
-  assert((rv32emu_hart_cpu(&smp, 1u)->csr[CSR_MIP] & MIP_MEIP) != 0u);
-  assert((rv32emu_hart_cpu(&smp, 0u)->csr[CSR_MIP] & MIP_MEIP) == 0u);
+  assert((rv32emu_cpu_mip_load(rv32emu_hart_cpu(&smp, 1u)) & MIP_MEIP) != 0u);
+  assert((rv32emu_cpu_mip_load(rv32emu_hart_cpu(&smp, 0u)) & MIP_MEIP) == 0u);
   assert(rv32emu_phys_read(&smp, RV32EMU_PLIC_BASE + 0x202004u, 4, &value));
   assert(value == 5u);
   assert(rv32emu_phys_write(&smp, RV32EMU_PLIC_BASE + 0x202004u, 4, 5u));
-  assert((rv32emu_hart_cpu(&smp, 1u)->csr[CSR_MIP] & MIP_MEIP) == 0u);
+  assert((rv32emu_cpu_mip_load(rv32emu_hart_cpu(&smp, 1u)) & MIP_MEIP) == 0u);
 
   rv32emu_platform_destroy(&smp);
   puts("[OK] rv32emu platform test passed");

@@ -91,30 +91,36 @@ static uint32_t rv32emu_sbi_current_hartid(const rv32emu_machine_t *m) {
 
 static void rv32emu_sbi_sync_timer_pending(rv32emu_machine_t *m) {
   uint32_t hartid = rv32emu_sbi_current_hartid(m);
-  bool expired = m->plat.mtime >= m->plat.clint_mtimecmp[hartid];
+  bool expired =
+      atomic_load_explicit(&m->plat.mtime, memory_order_relaxed) >= m->plat.clint_mtimecmp[hartid];
 
   if (m->opts.enable_sbi_shim) {
     if (expired) {
-      RV32EMU_CPU(m)->csr[CSR_MIP] |= MIP_STIP;
+      rv32emu_cpu_mip_set_bits(RV32EMU_CPU(m), MIP_STIP);
     } else {
-      RV32EMU_CPU(m)->csr[CSR_MIP] &= ~MIP_STIP;
+      rv32emu_cpu_mip_clear_bits(RV32EMU_CPU(m), MIP_STIP);
     }
-    RV32EMU_CPU(m)->csr[CSR_MIP] &= ~MIP_MTIP;
+    rv32emu_cpu_mip_clear_bits(RV32EMU_CPU(m), MIP_MTIP);
     return;
   }
 
   if (expired) {
-    RV32EMU_CPU(m)->csr[CSR_MIP] |= MIP_MTIP;
+    rv32emu_cpu_mip_set_bits(RV32EMU_CPU(m), MIP_MTIP);
   } else {
-    RV32EMU_CPU(m)->csr[CSR_MIP] &= ~MIP_MTIP;
+    rv32emu_cpu_mip_clear_bits(RV32EMU_CPU(m), MIP_MTIP);
   }
 }
 
 static void rv32emu_sbi_set_timer(rv32emu_machine_t *m, uint64_t stime_value) {
   uint32_t hartid = rv32emu_sbi_current_hartid(m);
+
+  if (pthread_mutex_lock(&m->plat.mmio_lock) != 0) {
+    return;
+  }
   m->plat.clint_mtimecmp[hartid] = stime_value;
   rv32emu_sbi_sync_timer_pending(m);
   rv32emu_timer_refresh_deadline(m);
+  (void)pthread_mutex_unlock(&m->plat.mmio_lock);
 }
 
 static bool rv32emu_sbi_handle_legacy(rv32emu_machine_t *m, uint32_t eid) {
@@ -131,11 +137,11 @@ static bool rv32emu_sbi_handle_legacy(rv32emu_machine_t *m, uint32_t eid) {
     rv32emu_sbi_set_legacy_ret(m, -1);
     return true;
   case SBI_EXT_LEGACY_CLEAR_IPI:
-    RV32EMU_CPU(m)->csr[CSR_MIP] &= ~MIP_MSIP;
+    rv32emu_cpu_mip_clear_bits(RV32EMU_CPU(m), MIP_MSIP);
     rv32emu_sbi_set_legacy_ret(m, 0);
     return true;
   case SBI_EXT_LEGACY_SEND_IPI:
-    RV32EMU_CPU(m)->csr[CSR_MIP] |= MIP_MSIP;
+    rv32emu_cpu_mip_set_bits(RV32EMU_CPU(m), MIP_MSIP);
     rv32emu_sbi_set_legacy_ret(m, 0);
     return true;
   case SBI_EXT_LEGACY_REMOTE_FENCE_I:
@@ -144,7 +150,7 @@ static bool rv32emu_sbi_handle_legacy(rv32emu_machine_t *m, uint32_t eid) {
     rv32emu_sbi_set_legacy_ret(m, 0);
     return true;
   case SBI_EXT_LEGACY_SHUTDOWN:
-    RV32EMU_CPU(m)->running = false;
+    atomic_store_explicit(&RV32EMU_CPU(m)->running, false, memory_order_release);
     rv32emu_sbi_set_legacy_ret(m, 0);
     return true;
   default:
@@ -217,7 +223,7 @@ static bool rv32emu_sbi_handle_ipi(rv32emu_machine_t *m, uint32_t fid) {
     hartid = hart_base + bit;
     target = rv32emu_hart_cpu(m, hartid);
     if (target != NULL) {
-      target->csr[CSR_MIP] |= MIP_SSIP;
+      rv32emu_cpu_mip_set_bits(target, MIP_SSIP);
     }
   }
   rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS, 0);
@@ -242,39 +248,45 @@ static bool rv32emu_sbi_handle_hsm(rv32emu_machine_t *m, uint32_t fid) {
       rv32emu_sbi_set_ret(m, SBI_ERR_INVALID_PARAM, 0);
       return true;
     }
-    if (target->running) {
+    if (atomic_load_explicit(&target->running, memory_order_acquire)) {
       rv32emu_sbi_set_ret(m, SBI_ERR_ALREADY_AVAILABLE, 0);
       return true;
     }
     memset(target, 0, sizeof(*target));
+    atomic_init(&target->running, false);
+    atomic_init(&target->lr_valid, false);
+    atomic_init(&target->mip, 0u);
     memcpy(target->csr, RV32EMU_CPU(m)->csr, sizeof(target->csr));
     target->pc = RV32EMU_CPU(m)->x[RV32EMU_REG_A1];
     target->x[RV32EMU_REG_A0] = hartid;
     target->x[RV32EMU_REG_A1] = RV32EMU_CPU(m)->x[RV32EMU_REG_A2];
     target->priv = RV32EMU_PRIV_S;
-    target->running = true;
     target->trace = m->opts.trace;
     target->csr[CSR_MHARTID] = hartid;
     target->csr[CSR_MISA] = rv32emu_default_misa_value();
-    target->csr[CSR_TIME] = (uint32_t)m->plat.mtime;
-    target->csr[CSR_MIP] &= ~(MIP_MSIP | MIP_SSIP | MIP_STIP | MIP_MTIP | MIP_SEIP | MIP_MEIP);
+    target->csr[CSR_TIME] = (uint32_t)atomic_load_explicit(&m->plat.mtime, memory_order_relaxed);
+    target->timer_batch_ticks = 0u;
+    rv32emu_cpu_mip_clear_bits(target, MIP_MSIP | MIP_SSIP | MIP_STIP | MIP_MTIP | MIP_SEIP |
+                                          MIP_MEIP);
     if (m->plat.clint_msip[hartid] != 0u) {
-      target->csr[CSR_MIP] |= MIP_MSIP;
+      rv32emu_cpu_mip_set_bits(target, MIP_MSIP);
     }
-    expired = m->plat.mtime >= m->plat.clint_mtimecmp[hartid];
+    expired =
+        atomic_load_explicit(&m->plat.mtime, memory_order_relaxed) >= m->plat.clint_mtimecmp[hartid];
     if (m->opts.enable_sbi_shim) {
       if (expired) {
-        target->csr[CSR_MIP] |= MIP_STIP;
+        rv32emu_cpu_mip_set_bits(target, MIP_STIP);
       }
-      target->csr[CSR_MIP] &= ~MIP_MTIP;
+      rv32emu_cpu_mip_clear_bits(target, MIP_MTIP);
     } else if (expired) {
-      target->csr[CSR_MIP] |= MIP_MTIP;
+      rv32emu_cpu_mip_set_bits(target, MIP_MTIP);
     }
+    atomic_store_explicit(&target->running, true, memory_order_release);
     rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS, 0);
     return true;
   }
   case 1u: /* hart_stop */
-    RV32EMU_CPU(m)->running = false;
+    atomic_store_explicit(&RV32EMU_CPU(m)->running, false, memory_order_release);
     rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS, 0);
     return true;
   case 2u: /* hart_status */
@@ -282,8 +294,10 @@ static bool rv32emu_sbi_handle_hsm(rv32emu_machine_t *m, uint32_t fid) {
       rv32emu_sbi_set_ret(m, SBI_ERR_INVALID_PARAM, 0);
       return true;
     }
-    rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS,
-                        target->running ? SBI_HSM_STATE_STARTED : SBI_HSM_STATE_STOPPED);
+    rv32emu_sbi_set_ret(
+        m, SBI_ERR_SUCCESS,
+        atomic_load_explicit(&target->running, memory_order_acquire) ? SBI_HSM_STATE_STARTED
+                                                                      : SBI_HSM_STATE_STOPPED);
     return true;
   case 3u: /* hart_suspend */
     rv32emu_sbi_set_ret(m, SBI_ERR_NOT_SUPPORTED, 0);
@@ -300,7 +314,7 @@ static bool rv32emu_sbi_handle_srst(rv32emu_machine_t *m, uint32_t fid) {
     return true;
   }
 
-  RV32EMU_CPU(m)->running = false;
+  atomic_store_explicit(&RV32EMU_CPU(m)->running, false, memory_order_release);
   rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS, 0);
   return true;
 }

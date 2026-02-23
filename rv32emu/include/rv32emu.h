@@ -1,9 +1,16 @@
 #ifndef RV32EMU_H
 #define RV32EMU_H
 
+/* Ensure pthread rwlock types are visible under strict C modes. */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h>
+#include <pthread.h>
 
 #define RV32EMU_DRAM_BASE 0x80000000u
 #define RV32EMU_DEFAULT_RAM_MB 256u
@@ -161,11 +168,21 @@ typedef struct {
   uint8_t *dram;
   uint32_t dram_base;
   uint32_t dram_size;
+  pthread_mutex_t dram_lock;
+  pthread_mutex_t amo_lock;
+  pthread_mutex_t mmio_lock;
+  bool dram_atomic_stats_enable;
 
-  uint64_t mtime;
+  atomic_uint_fast64_t mtime;
   uint64_t clint_mtimecmp[RV32EMU_MAX_HARTS];
   uint32_t clint_msip[RV32EMU_MAX_HARTS];
-  uint64_t next_timer_deadline;
+  atomic_uint_fast64_t next_timer_deadline;
+  atomic_uint_fast64_t dram_atomic_read_aligned32;
+  atomic_uint_fast64_t dram_atomic_read_aligned16;
+  atomic_uint_fast64_t dram_atomic_read_bytepath;
+  atomic_uint_fast64_t dram_atomic_write_aligned32;
+  atomic_uint_fast64_t dram_atomic_write_aligned16;
+  atomic_uint_fast64_t dram_atomic_write_bytepath;
 
   uint32_t plic_pending;
   uint32_t plic_enable[RV32EMU_MAX_PLIC_CONTEXTS];
@@ -187,11 +204,13 @@ typedef struct {
   uint64_t instret;
 
   rv32emu_priv_t priv;
-  bool running;
+  atomic_bool running;
   bool trace;
 
   uint32_t lr_addr;
-  bool lr_valid;
+  atomic_bool lr_valid;
+  atomic_uint_fast32_t mip;
+  uint32_t timer_batch_ticks;
 
   uint32_t csr[4096];
 } rv32emu_cpu_t;
@@ -206,7 +225,11 @@ typedef struct {
   uint32_t hart_count;
   uint32_t active_hart;
   rv32emu_cpu_t *cpu_cur;
+  bool threaded_exec_active;
 } rv32emu_machine_t;
+
+extern _Thread_local rv32emu_machine_t *rv32emu_tls_machine;
+extern _Thread_local rv32emu_cpu_t *rv32emu_tls_cpu;
 
 static inline uint32_t rv32emu_hart_slot(const rv32emu_machine_t *m, uint32_t hartid) {
   if (m == NULL || hartid >= m->hart_count || hartid >= RV32EMU_MAX_HARTS) {
@@ -253,10 +276,16 @@ static inline const rv32emu_cpu_t *rv32emu_current_cpu_const(const rv32emu_machi
 }
 
 static inline rv32emu_cpu_t *rv32emu_current_cpu_fast(rv32emu_machine_t *m) {
+  if (rv32emu_tls_machine == m && rv32emu_tls_cpu != NULL) {
+    return rv32emu_tls_cpu;
+  }
   return m->cpu_cur;
 }
 
 static inline const rv32emu_cpu_t *rv32emu_current_cpu_const_fast(const rv32emu_machine_t *m) {
+  if (rv32emu_tls_machine == m && rv32emu_tls_cpu != NULL) {
+    return rv32emu_tls_cpu;
+  }
   return m->cpu_cur;
 }
 
@@ -273,17 +302,63 @@ static inline void rv32emu_set_active_hart(rv32emu_machine_t *m, uint32_t hartid
   m->cpu_cur = &m->harts[hartid];
 }
 
+static inline void rv32emu_bind_thread_hart(rv32emu_machine_t *m, uint32_t hartid) {
+  if (m == NULL || hartid >= m->hart_count) {
+    rv32emu_tls_machine = NULL;
+    rv32emu_tls_cpu = NULL;
+    return;
+  }
+
+  rv32emu_tls_machine = m;
+  rv32emu_tls_cpu = &m->harts[hartid];
+}
+
+static inline void rv32emu_unbind_thread_hart(void) {
+  rv32emu_tls_machine = NULL;
+  rv32emu_tls_cpu = NULL;
+}
+
 #define RV32EMU_CPU(m) rv32emu_current_cpu_fast(m)
 #define RV32EMU_CPU_CONST(m) rv32emu_current_cpu_const_fast(m)
 
+static inline uint32_t rv32emu_cpu_mip_load(const rv32emu_cpu_t *cpu) {
+  if (cpu == NULL) {
+    return 0u;
+  }
+  return (uint32_t)atomic_load_explicit(&cpu->mip, memory_order_relaxed);
+}
+
+static inline void rv32emu_cpu_mip_store(rv32emu_cpu_t *cpu, uint32_t value) {
+  if (cpu == NULL) {
+    return;
+  }
+  atomic_store_explicit(&cpu->mip, value, memory_order_relaxed);
+}
+
+static inline void rv32emu_cpu_mip_set_bits(rv32emu_cpu_t *cpu, uint32_t mask) {
+  if (cpu == NULL) {
+    return;
+  }
+  atomic_fetch_or_explicit(&cpu->mip, mask, memory_order_relaxed);
+}
+
+static inline void rv32emu_cpu_mip_clear_bits(rv32emu_cpu_t *cpu, uint32_t mask) {
+  if (cpu == NULL) {
+    return;
+  }
+  atomic_fetch_and_explicit(&cpu->mip, ~mask, memory_order_relaxed);
+}
+
 static inline uint64_t rv32emu_timer_next_deadline(const rv32emu_machine_t *m) {
   uint64_t next = UINT64_MAX;
+  uint64_t mtime;
   uint32_t hart;
 
   if (m == NULL) {
     return UINT64_MAX;
   }
 
+  mtime = atomic_load_explicit(&m->plat.mtime, memory_order_relaxed);
   for (hart = 0u; hart < m->hart_count; hart++) {
     uint64_t cmp = m->plat.clint_mtimecmp[hart];
 
@@ -292,7 +367,7 @@ static inline uint64_t rv32emu_timer_next_deadline(const rv32emu_machine_t *m) {
      * Expired comparators (cmp <= mtime) already have pending IRQ state, and
      * including them would force a pointless full-hart scan every instruction.
      */
-    if (cmp > m->plat.mtime && cmp < next) {
+    if (cmp > mtime && cmp < next) {
       next = cmp;
     }
   }
@@ -304,7 +379,8 @@ static inline void rv32emu_timer_refresh_deadline(rv32emu_machine_t *m) {
   if (m == NULL) {
     return;
   }
-  m->plat.next_timer_deadline = rv32emu_timer_next_deadline(m);
+  atomic_store_explicit(&m->plat.next_timer_deadline, rv32emu_timer_next_deadline(m),
+                        memory_order_relaxed);
 }
 
 static inline bool rv32emu_any_hart_running(const rv32emu_machine_t *m) {
@@ -316,7 +392,7 @@ static inline bool rv32emu_any_hart_running(const rv32emu_machine_t *m) {
 
   for (i = 0; i < m->hart_count; i++) {
     const rv32emu_cpu_t *cpu = rv32emu_hart_cpu_const(m, i);
-    if (cpu != NULL && cpu->running) {
+    if (cpu != NULL && atomic_load_explicit(&cpu->running, memory_order_acquire)) {
       return true;
     }
   }
@@ -335,6 +411,7 @@ bool rv32emu_phys_write(rv32emu_machine_t *m, uint32_t paddr, int len, uint32_t 
 bool rv32emu_uart_push_rx(rv32emu_machine_t *m, uint8_t data);
 
 void rv32emu_step_timer(rv32emu_machine_t *m);
+void rv32emu_flush_timer(rv32emu_machine_t *m);
 
 bool rv32emu_translate(rv32emu_machine_t *m, uint32_t vaddr, rv32emu_access_t access,
                        uint32_t *paddr_out);

@@ -2,6 +2,8 @@
 
 - 总实施计划：`docs/emulator/opensbi-linux-rootfs-implementation-plan.md`
 - 双核 Linux 调通技术总结：`docs/emulator/smp-linux-bringup-technical-summary.md`
+- SMP threaded 内存语义清单：`docs/emulator/smp-threaded-memory-semantics-checklist.md`
+- 块级 JIT 启动计划：`docs/emulator/block-jit-kickoff-plan.md`
 - Phase-1 Boot Contract：`docs/emulator/boot-contract.md`
 - QEMU 基线复盘：`docs/qemu-smoke/rv32-qemu-smoke-retrospective.md`
 - 成功日志样例：`docs/logs/2026-02-22-qemu-smoke-success.log`
@@ -21,6 +23,8 @@ Quick checks:
 - `make build-linux-smp`
 - `make smoke-emulator-smp`
 - `make smoke-emulator-smp-linux`
+- `make smoke-emulator-smp-threaded`
+- `make smoke-emulator-smp-linux-threaded`
 
 `make smoke-emulator-smp` 会串行执行两段验收：
 1. `hart_count=1` 下验证 `Linux banner` + `init handoff`。
@@ -28,3 +32,6 @@ Quick checks:
 
 `make smoke-emulator-smp-linux` 保持阶段 1 不变，并把阶段 2 升级为严格双核 Linux marker 验收：
 `Linux banner` + `kernel cmdline` + `init handoff` + `hart1 running`。
+
+`make smoke-emulator-smp-linux-threaded` 在相同严格条件下启用
+`RV32EMU_EXPERIMENTAL_HART_THREADS=1`，用于回归“每个 hart 一个 host 线程”实验路径。

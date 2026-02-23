@@ -5,8 +5,13 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <sched.h>
 
 #define RV32EMU_HART_SLICE_INSTR 64u
+#define RV32EMU_WORKER_COMMIT_BATCH 256u
+
+_Thread_local rv32emu_machine_t *rv32emu_tls_machine = NULL;
+_Thread_local rv32emu_cpu_t *rv32emu_tls_cpu = NULL;
 
 static inline uint32_t rv32emu_bits(uint32_t value, int hi, int lo) {
   return (value >> lo) & ((1u << (hi - lo + 1)) - 1u);
@@ -314,7 +319,7 @@ static bool rv32emu_store_value(rv32emu_machine_t *m, uint32_t addr, uint32_t fu
   }
 
   if (ok) {
-    RV32EMU_CPU(m)->lr_valid = false;
+    atomic_store_explicit(&RV32EMU_CPU(m)->lr_valid, false, memory_order_release);
   }
   return ok;
 }
@@ -521,6 +526,7 @@ static bool rv32emu_exec_amo(rv32emu_machine_t *m, uint32_t insn) {
   uint32_t old_val = 0;
   uint32_t new_val = 0;
   uint32_t rs2v = RV32EMU_CPU(m)->x[rs2];
+  bool ok = false;
 
   if (funct3 != 0x2u) {
     rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, insn);
@@ -530,11 +536,14 @@ static bool rv32emu_exec_amo(rv32emu_machine_t *m, uint32_t insn) {
     rv32emu_raise_exception(m, RV32EMU_EXC_LOAD_MISALIGNED, addr);
     return false;
   }
+  if (pthread_mutex_lock(&m->plat.amo_lock) != 0) {
+    return false;
+  }
 
   if (funct5 == 0x2u) { /* lr.w */
     if (rs2 != 0u) {
       rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, insn);
-      return false;
+      goto out;
     }
     /*
      * lr.w:
@@ -546,12 +555,13 @@ static bool rv32emu_exec_amo(rv32emu_machine_t *m, uint32_t insn) {
      * (see rv32emu_virt_write() invalidation hook).
      */
     if (!rv32emu_virt_read(m, addr, 4, RV32EMU_ACC_LOAD, &old_val)) {
-      return false;
+      goto out;
     }
     RV32EMU_CPU(m)->lr_addr = addr;
-    RV32EMU_CPU(m)->lr_valid = true;
+    atomic_store_explicit(&RV32EMU_CPU(m)->lr_valid, true, memory_order_release);
     rv32emu_write_rd(m, rd, old_val);
-    return true;
+    ok = true;
+    goto out;
   }
 
   if (funct5 == 0x3u) { /* sc.w */
@@ -568,19 +578,21 @@ static bool rv32emu_exec_amo(rv32emu_machine_t *m, uint32_t insn) {
      *
      * In both cases, sc.w consumes/clears the local reservation.
      */
-    if (RV32EMU_CPU(m)->lr_valid && RV32EMU_CPU(m)->lr_addr == addr) {
+    if (atomic_load_explicit(&RV32EMU_CPU(m)->lr_valid, memory_order_acquire) &&
+        RV32EMU_CPU(m)->lr_addr == addr) {
       if (!rv32emu_virt_write(m, addr, 4, RV32EMU_ACC_STORE, rs2v)) {
-        return false;
+        goto out;
       }
       status = 0u;
     }
-    RV32EMU_CPU(m)->lr_valid = false;
+    atomic_store_explicit(&RV32EMU_CPU(m)->lr_valid, false, memory_order_release);
     rv32emu_write_rd(m, rd, status);
-    return true;
+    ok = true;
+    goto out;
   }
 
   if (!rv32emu_virt_read(m, addr, 4, RV32EMU_ACC_LOAD, &old_val)) {
-    return false;
+    goto out;
   }
 
   switch (funct5) {
@@ -613,19 +625,24 @@ static bool rv32emu_exec_amo(rv32emu_machine_t *m, uint32_t insn) {
     break;
   default:
     rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, insn);
-    return false;
+    goto out;
   }
 
   if (!rv32emu_virt_write(m, addr, 4, RV32EMU_ACC_STORE, new_val)) {
-    return false;
+    goto out;
   }
   /*
    * AMO writes are regular stores from LR/SC perspective, so clear local
    * reservation as well. Cross-hart invalidation is handled by virt_write().
    */
-  RV32EMU_CPU(m)->lr_valid = false;
+  atomic_store_explicit(&RV32EMU_CPU(m)->lr_valid, false, memory_order_release);
   rv32emu_write_rd(m, rd, old_val);
-  return true;
+
+  ok = true;
+
+out:
+  (void)pthread_mutex_unlock(&m->plat.amo_lock);
+  return ok;
 }
 
 static bool rv32emu_exec_compressed(rv32emu_machine_t *m, uint16_t insn, uint32_t *next_pc) {
@@ -1218,7 +1235,7 @@ static int rv32emu_run_single_thread(rv32emu_machine_t *m, uint64_t max_instruct
     for (checked = 0u; checked < m->hart_count; checked++) {
       uint32_t hart = (next_hart + checked) % m->hart_count;
 
-      if (!m->harts[hart].running) {
+      if (!atomic_load_explicit(&m->harts[hart].running, memory_order_acquire)) {
         continue;
       }
 
@@ -1226,10 +1243,11 @@ static int rv32emu_run_single_thread(rv32emu_machine_t *m, uint64_t max_instruct
       rv32emu_set_active_hart(m, hart);
 
       for (uint32_t slice = 0u;
-           slice < RV32EMU_HART_SLICE_INSTR && executed < max_instructions && RV32EMU_CPU(m)->running;
+           slice < RV32EMU_HART_SLICE_INSTR && executed < max_instructions &&
+           atomic_load_explicit(&RV32EMU_CPU(m)->running, memory_order_acquire);
            slice++) {
         if (rv32emu_check_pending_interrupt(m)) {
-          if (!RV32EMU_CPU(m)->running) {
+          if (!atomic_load_explicit(&RV32EMU_CPU(m)->running, memory_order_acquire)) {
             break;
           }
           continue;
@@ -1240,7 +1258,7 @@ static int rv32emu_run_single_thread(rv32emu_machine_t *m, uint64_t max_instruct
           continue;
         }
 
-        if (!RV32EMU_CPU(m)->running) {
+        if (!atomic_load_explicit(&RV32EMU_CPU(m)->running, memory_order_acquire)) {
           break;
         }
       }
@@ -1259,11 +1277,8 @@ static int rv32emu_run_single_thread(rv32emu_machine_t *m, uint64_t max_instruct
 }
 
 typedef struct {
-  pthread_mutex_t lock;
-  pthread_cond_t cv;
-  uint64_t executed;
-  bool stop;
-  uint32_t turn;
+  atomic_uint_fast64_t executed;
+  atomic_bool stop;
 } rv32emu_thread_state_t;
 
 typedef struct {
@@ -1273,90 +1288,77 @@ typedef struct {
   uint32_t hartid;
 } rv32emu_worker_ctx_t;
 
-static uint32_t rv32emu_next_running_hart(const rv32emu_machine_t *m, uint32_t start) {
-  uint32_t checked;
+static bool rv32emu_worker_commit_executed(rv32emu_thread_state_t *state, uint64_t *local_executed,
+                                           uint64_t max_instructions) {
+  uint64_t executed_now;
 
-  if (m == NULL || m->hart_count == 0u) {
-    return 0u;
+  if (state == NULL || local_executed == NULL || *local_executed == 0u) {
+    return false;
   }
 
-  for (checked = 0u; checked < m->hart_count; checked++) {
-    uint32_t hart = (start + checked) % m->hart_count;
-    if (m->harts[hart].running) {
-      return hart;
-    }
+  executed_now = atomic_fetch_add_explicit(&state->executed, *local_executed, memory_order_relaxed) +
+                 *local_executed;
+  *local_executed = 0u;
+  if (executed_now >= max_instructions) {
+    atomic_store_explicit(&state->stop, true, memory_order_release);
+    return true;
   }
-
-  return m->hart_count;
+  return false;
 }
 
 static void *rv32emu_run_worker(void *opaque) {
   rv32emu_worker_ctx_t *ctx = (rv32emu_worker_ctx_t *)opaque;
   rv32emu_thread_state_t *state = ctx->state;
+  rv32emu_cpu_t *cpu = rv32emu_hart_cpu(ctx->m, ctx->hartid);
+  uint64_t local_executed = 0u;
 
-  if (pthread_mutex_lock(&state->lock) != 0) {
+  if (cpu == NULL) {
     return NULL;
   }
+  rv32emu_bind_thread_hart(ctx->m, ctx->hartid);
 
   for (;;) {
-    while (!state->stop && state->executed < ctx->max_instructions && state->turn != ctx->hartid) {
-      (void)pthread_cond_wait(&state->cv, &state->lock);
-    }
-
-    if (state->stop || state->executed >= ctx->max_instructions) {
+    if (atomic_load_explicit(&state->stop, memory_order_acquire)) {
       break;
     }
-
-    /*
-     * Keep the historical slice scheduler semantics by handing a run-token to
-     * one hart thread at a time. This keeps behavior stable while introducing
-     * per-hart host threads for concurrency experiments.
-     */
-    rv32emu_set_active_hart(ctx->m, ctx->hartid);
-
-    if (RV32EMU_CPU(ctx->m)->running) {
-      for (uint32_t slice = 0u;
-           slice < RV32EMU_HART_SLICE_INSTR && state->executed < ctx->max_instructions &&
-           RV32EMU_CPU(ctx->m)->running;
-           slice++) {
-        if (rv32emu_check_pending_interrupt(ctx->m)) {
-          if (!RV32EMU_CPU(ctx->m)->running) {
-            break;
-          }
-          continue;
-        }
-
-        if (rv32emu_exec_one(ctx->m)) {
-          state->executed += 1;
-          continue;
-        }
-
-        if (!RV32EMU_CPU(ctx->m)->running) {
-          break;
-        }
-      }
-    }
-
-    if (state->executed >= ctx->max_instructions) {
-      state->stop = true;
-      (void)pthread_cond_broadcast(&state->cv);
+    if (atomic_load_explicit(&state->executed, memory_order_relaxed) + local_executed >=
+        ctx->max_instructions) {
+      atomic_store_explicit(&state->stop, true, memory_order_release);
       break;
     }
-
-    {
-      uint32_t next = rv32emu_next_running_hart(ctx->m, (ctx->hartid + 1u) % ctx->m->hart_count);
-      if (next >= ctx->m->hart_count) {
-        state->stop = true;
+    if (!atomic_load_explicit(&cpu->running, memory_order_acquire)) {
+      (void)rv32emu_worker_commit_executed(state, &local_executed, ctx->max_instructions);
+      if (!rv32emu_any_hart_running(ctx->m)) {
+        atomic_store_explicit(&state->stop, true, memory_order_release);
+        break;
       } else {
-        state->turn = next;
+        sched_yield();
+        continue;
       }
     }
-
-    (void)pthread_cond_broadcast(&state->cv);
+    if (rv32emu_check_pending_interrupt(ctx->m)) {
+      if (!atomic_load_explicit(&cpu->running, memory_order_acquire) &&
+          !rv32emu_any_hart_running(ctx->m)) {
+        atomic_store_explicit(&state->stop, true, memory_order_release);
+      }
+      continue;
+    }
+    if (rv32emu_exec_one(ctx->m)) {
+      local_executed += 1u;
+      if (local_executed >= RV32EMU_WORKER_COMMIT_BATCH) {
+        (void)rv32emu_worker_commit_executed(state, &local_executed, ctx->max_instructions);
+      }
+      continue;
+    }
+    if (!atomic_load_explicit(&cpu->running, memory_order_acquire) &&
+        !rv32emu_any_hart_running(ctx->m)) {
+      atomic_store_explicit(&state->stop, true, memory_order_release);
+    }
   }
 
-  (void)pthread_cond_broadcast(&state->cv);
-  (void)pthread_mutex_unlock(&state->lock);
+  (void)rv32emu_worker_commit_executed(state, &local_executed, ctx->max_instructions);
+  rv32emu_flush_timer(ctx->m);
+  rv32emu_unbind_thread_hart();
   return NULL;
 }
 
@@ -1367,20 +1369,13 @@ static int rv32emu_run_threaded(rv32emu_machine_t *m, uint64_t max_instructions)
   uint32_t hart;
   uint32_t started = 0;
   bool create_failed = false;
+  uint64_t executed_total;
 
-  if (pthread_mutex_init(&state.lock, NULL) != 0) {
-    return rv32emu_run_single_thread(m, max_instructions);
-  }
-  if (pthread_cond_init(&state.cv, NULL) != 0) {
-    (void)pthread_mutex_destroy(&state.lock);
-    return rv32emu_run_single_thread(m, max_instructions);
-  }
-
-  state.executed = 0;
-  state.stop = false;
-  state.turn = rv32emu_next_running_hart(m, 0u);
-  if (state.turn >= m->hart_count) {
-    state.stop = true;
+  atomic_store_explicit(&state.executed, 0u, memory_order_relaxed);
+  atomic_store_explicit(&state.stop, false, memory_order_relaxed);
+  m->threaded_exec_active = true;
+  for (hart = 0u; hart < m->hart_count; hart++) {
+    m->harts[hart].timer_batch_ticks = 0u;
   }
 
   for (hart = 0u; hart < m->hart_count; hart++) {
@@ -1397,29 +1392,26 @@ static int rv32emu_run_threaded(rv32emu_machine_t *m, uint64_t max_instructions)
   }
 
   if (create_failed) {
-    if (pthread_mutex_lock(&state.lock) == 0) {
-      state.stop = true;
-      (void)pthread_cond_broadcast(&state.cv);
-      (void)pthread_mutex_unlock(&state.lock);
-    }
+    atomic_store_explicit(&state.stop, true, memory_order_release);
   }
 
   for (hart = 0u; hart < started; hart++) {
     (void)pthread_join(threads[hart], NULL);
   }
-  (void)pthread_cond_destroy(&state.cv);
-  (void)pthread_mutex_destroy(&state.lock);
+  m->threaded_exec_active = false;
 
-  if (create_failed && state.executed < max_instructions && rv32emu_any_hart_running(m)) {
-    int tail = rv32emu_run_single_thread(m, max_instructions - state.executed);
+  executed_total = atomic_load_explicit(&state.executed, memory_order_relaxed);
+
+  if (create_failed && executed_total < max_instructions && rv32emu_any_hart_running(m)) {
+    int tail = rv32emu_run_single_thread(m, max_instructions - executed_total);
     if (tail < 0) {
       return -1;
     }
-    state.executed += (uint64_t)tail;
+    executed_total += (uint64_t)tail;
   }
 
   rv32emu_set_active_hart(m, 0u);
-  return (int)state.executed;
+  return (int)executed_total;
 }
 
 int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {

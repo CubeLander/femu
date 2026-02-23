@@ -59,7 +59,33 @@ bool rv32emu_platform_init(rv32emu_machine_t *m, const rv32emu_options_t *opts) 
     return false;
   }
 
-  m->plat.mtime = 0;
+  if (pthread_mutex_init(&m->plat.dram_lock, NULL) != 0) {
+    free(m->plat.dram);
+    m->plat.dram = NULL;
+    return false;
+  }
+  if (pthread_mutex_init(&m->plat.mmio_lock, NULL) != 0) {
+    (void)pthread_mutex_destroy(&m->plat.dram_lock);
+    free(m->plat.dram);
+    m->plat.dram = NULL;
+    return false;
+  }
+  if (pthread_mutex_init(&m->plat.amo_lock, NULL) != 0) {
+    (void)pthread_mutex_destroy(&m->plat.mmio_lock);
+    (void)pthread_mutex_destroy(&m->plat.dram_lock);
+    free(m->plat.dram);
+    m->plat.dram = NULL;
+    return false;
+  }
+
+  m->plat.dram_atomic_stats_enable = false;
+  atomic_store_explicit(&m->plat.mtime, 0u, memory_order_relaxed);
+  atomic_store_explicit(&m->plat.dram_atomic_read_aligned32, 0u, memory_order_relaxed);
+  atomic_store_explicit(&m->plat.dram_atomic_read_aligned16, 0u, memory_order_relaxed);
+  atomic_store_explicit(&m->plat.dram_atomic_read_bytepath, 0u, memory_order_relaxed);
+  atomic_store_explicit(&m->plat.dram_atomic_write_aligned32, 0u, memory_order_relaxed);
+  atomic_store_explicit(&m->plat.dram_atomic_write_aligned16, 0u, memory_order_relaxed);
+  atomic_store_explicit(&m->plat.dram_atomic_write_bytepath, 0u, memory_order_relaxed);
   for (hart = 0u; hart < RV32EMU_MAX_HARTS; hart++) {
     m->plat.clint_mtimecmp[hart] = UINT64_MAX;
     m->plat.clint_msip[hart] = 0u;
@@ -74,11 +100,14 @@ bool rv32emu_platform_init(rv32emu_machine_t *m, const rv32emu_options_t *opts) 
     rv32emu_cpu_t *cpu = &m->harts[hart];
 
     cpu->priv = RV32EMU_PRIV_M;
-    cpu->running = (hart == 0u);
+    atomic_store_explicit(&cpu->running, hart == 0u, memory_order_relaxed);
     cpu->trace = m->opts.trace;
     cpu->csr[CSR_MHARTID] = hart;
     cpu->csr[CSR_MISA] = rv32emu_default_misa_value();
     cpu->csr[CSR_TIME] = 0;
+    atomic_store_explicit(&cpu->lr_valid, false, memory_order_relaxed);
+    atomic_store_explicit(&cpu->mip, 0u, memory_order_relaxed);
+    cpu->timer_batch_ticks = 0u;
   }
 
   return true;
@@ -92,4 +121,7 @@ void rv32emu_platform_destroy(rv32emu_machine_t *m) {
   free(m->plat.dram);
   m->plat.dram = NULL;
   m->plat.dram_size = 0;
+  (void)pthread_mutex_destroy(&m->plat.amo_lock);
+  (void)pthread_mutex_destroy(&m->plat.mmio_lock);
+  (void)pthread_mutex_destroy(&m->plat.dram_lock);
 }

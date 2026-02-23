@@ -42,11 +42,11 @@ static void rv32emu_invalidate_lr_reservations(rv32emu_machine_t *m, uint32_t va
   for (hartid = 0u; hartid < m->hart_count; hartid++) {
     rv32emu_cpu_t *cpu = rv32emu_hart_cpu(m, hartid);
 
-    if (cpu == NULL || !cpu->lr_valid) {
+    if (cpu == NULL || !atomic_load_explicit(&cpu->lr_valid, memory_order_acquire)) {
       continue;
     }
     if (rv32emu_ranges_overlap(vaddr, (uint32_t)len, cpu->lr_addr, 4u)) {
-      cpu->lr_valid = false;
+      atomic_store_explicit(&cpu->lr_valid, false, memory_order_release);
     }
   }
 }
@@ -123,7 +123,7 @@ static void rv32emu_take_trap(rv32emu_machine_t *m, uint32_t cause, uint32_t tva
     RV32EMU_CPU(m)->csr[CSR_MSTATUS] = mstatus;
     RV32EMU_CPU(m)->priv = RV32EMU_PRIV_S;
     RV32EMU_CPU(m)->pc = stvec_base;
-    RV32EMU_CPU(m)->running = (stvec_base != 0u);
+    atomic_store_explicit(&RV32EMU_CPU(m)->running, stvec_base != 0u, memory_order_release);
     return;
   }
 
@@ -152,7 +152,7 @@ static void rv32emu_take_trap(rv32emu_machine_t *m, uint32_t cause, uint32_t tva
     RV32EMU_CPU(m)->csr[CSR_MSTATUS] = mstatus;
     RV32EMU_CPU(m)->priv = RV32EMU_PRIV_M;
     RV32EMU_CPU(m)->pc = mtvec_base;
-    RV32EMU_CPU(m)->running = (mtvec_base != 0u);
+    atomic_store_explicit(&RV32EMU_CPU(m)->running, mtvec_base != 0u, memory_order_release);
   }
 }
 
@@ -348,23 +348,29 @@ void rv32emu_raise_interrupt(rv32emu_machine_t *m, uint32_t cause_num) {
     return;
   }
 
-  RV32EMU_CPU(m)->csr[CSR_MIP] |= (1u << cause_num);
+  rv32emu_cpu_mip_set_bits(RV32EMU_CPU(m), (1u << cause_num));
 }
 
 bool rv32emu_check_pending_interrupt(rv32emu_machine_t *m) {
+  rv32emu_cpu_t *cpu;
   uint32_t enabled_pending;
   uint32_t mstatus;
   uint32_t mideleg;
+  uint32_t selected_cause = 0u;
+  bool has_selected = false;
   uint32_t priority[] = {RV32EMU_IRQ_MEIP, RV32EMU_IRQ_MSIP, RV32EMU_IRQ_MTIP,
                          RV32EMU_IRQ_SEIP, RV32EMU_IRQ_SSIP, RV32EMU_IRQ_STIP};
 
   if (m == NULL) {
     return false;
   }
-
-  enabled_pending = rv32emu_csr_read(m, CSR_MIE) & rv32emu_csr_read(m, CSR_MIP);
-  mstatus = RV32EMU_CPU(m)->csr[CSR_MSTATUS];
-  mideleg = RV32EMU_CPU(m)->csr[CSR_MIDELEG];
+  cpu = RV32EMU_CPU(m);
+  if (cpu == NULL) {
+    return false;
+  }
+  enabled_pending = cpu->csr[CSR_MIE] & rv32emu_cpu_mip_load(cpu);
+  mstatus = cpu->csr[CSR_MSTATUS];
+  mideleg = cpu->csr[CSR_MIDELEG];
 
   for (uint32_t i = 0; i < sizeof(priority) / sizeof(priority[0]); i++) {
     uint32_t cause = priority[i];
@@ -377,16 +383,16 @@ bool rv32emu_check_pending_interrupt(rv32emu_machine_t *m) {
     }
 
     if (delegated) {
-      if (RV32EMU_CPU(m)->priv == RV32EMU_PRIV_M) {
+      if (cpu->priv == RV32EMU_PRIV_M) {
         continue;
       }
-      if (RV32EMU_CPU(m)->priv == RV32EMU_PRIV_S) {
+      if (cpu->priv == RV32EMU_PRIV_S) {
         global_enabled = (mstatus & MSTATUS_SIE) != 0u;
       } else {
         global_enabled = true;
       }
     } else {
-      if (RV32EMU_CPU(m)->priv == RV32EMU_PRIV_M) {
+      if (cpu->priv == RV32EMU_PRIV_M) {
         global_enabled = (mstatus & MSTATUS_MIE) != 0u;
       } else {
         global_enabled = true;
@@ -397,7 +403,13 @@ bool rv32emu_check_pending_interrupt(rv32emu_machine_t *m) {
       continue;
     }
 
-    rv32emu_take_trap(m, cause, 0, true);
+    selected_cause = cause;
+    has_selected = true;
+    break;
+  }
+
+  if (has_selected) {
+    rv32emu_take_trap(m, selected_cause, 0, true);
     return true;
   }
 

@@ -85,9 +85,53 @@ static void test_rvc_basic(void) {
   rv32emu_platform_destroy(&m);
 }
 
+static void test_multihart_round_robin(void) {
+  rv32emu_machine_t m;
+  rv32emu_options_t opts;
+  uint32_t pc;
+  uint32_t prog[] = {
+      0x00128293u, /* addi x5, x5, 1 */
+      0x00100073u, /* ebreak */
+  };
+  int steps;
+
+  rv32emu_default_options(&opts);
+  opts.hart_count = 2u;
+  assert(rv32emu_platform_init(&m, &opts));
+  assert(m.hart_count == 2u);
+
+  pc = RV32EMU_DRAM_BASE + 0x200u;
+  for (uint32_t i = 0; i < (uint32_t)(sizeof(prog) / sizeof(prog[0])); i++) {
+    assert(rv32emu_phys_write(&m, pc + i * 4u, 4, prog[i]));
+  }
+
+  m.harts[0].pc = pc;
+  m.harts[0].running = true;
+
+  m.harts[1].pc = pc;
+  m.harts[1].running = true;
+  m.harts[1].priv = RV32EMU_PRIV_M;
+  m.harts[1].csr[CSR_MHARTID] = 1u;
+
+  steps = rv32emu_run(&m, 64);
+  assert(steps == 2);
+
+  assert(m.harts[0].x[5] == 1u);
+  assert(m.harts[1].x[5] == 1u);
+  assert(m.harts[0].running == false);
+  assert(m.harts[1].running == false);
+  assert(m.harts[0].csr[CSR_MCAUSE] == RV32EMU_EXC_BREAKPOINT);
+  assert(m.harts[1].csr[CSR_MCAUSE] == RV32EMU_EXC_BREAKPOINT);
+  assert(m.harts[0].csr[CSR_MHARTID] == 0u);
+  assert(m.harts[1].csr[CSR_MHARTID] == 1u);
+
+  rv32emu_platform_destroy(&m);
+}
+
 int main(void) {
   test_base32();
   test_rvc_basic();
+  test_multihart_round_robin();
   puts("[OK] rv32emu run test passed");
   return 0;
 }

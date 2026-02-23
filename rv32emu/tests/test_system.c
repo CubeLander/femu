@@ -8,6 +8,7 @@
 #define SBI_EXT_LEGACY_SHUTDOWN 0x08u
 #define SBI_EXT_BASE 0x10u
 #define SBI_EXT_TIME 0x54494d45u
+#define SBI_EXT_HSM 0x48534du
 #define SATP_MODE_SV32 (1u << 31)
 #define SATP_PPN_MASK 0x003fffffu
 
@@ -116,7 +117,7 @@ static void test_sbi_shim_handle_and_ecall(void) {
   m.cpu.x[10] = 120u;
   m.cpu.x[11] = 0u;
   assert(rv32emu_handle_sbi_ecall(&m));
-  assert(m.plat.mtimecmp == 120u);
+  assert(m.plat.clint_mtimecmp[0] == 120u);
   assert((m.cpu.csr[CSR_MIP] & (MIP_STIP | MIP_MTIP)) == 0u);
   for (uint32_t i = 0; i < 20; i++) {
     rv32emu_step_timer(&m);
@@ -128,7 +129,7 @@ static void test_sbi_shim_handle_and_ecall(void) {
   m.cpu.x[10] = 140u;
   m.cpu.x[11] = 0u;
   assert(rv32emu_handle_sbi_ecall(&m));
-  assert(m.plat.mtimecmp == 140u);
+  assert(m.plat.clint_mtimecmp[0] == 140u);
   assert(m.cpu.x[10] == 0u);
 
   m.cpu.running = true;
@@ -155,6 +156,55 @@ static void test_sbi_shim_handle_and_ecall(void) {
   assert(m.cpu.x[10] == 0u);
   assert(m.cpu.running == false);
   assert(m.cpu.csr[CSR_MCAUSE] == RV32EMU_EXC_BREAKPOINT);
+
+  rv32emu_platform_destroy(&m);
+}
+
+static void test_sbi_hsm_start_status(void) {
+  rv32emu_machine_t m;
+  rv32emu_options_t opts;
+
+  rv32emu_default_options(&opts);
+  opts.enable_sbi_shim = true;
+  opts.hart_count = 2u;
+  assert(rv32emu_platform_init(&m, &opts));
+
+  m.cpu.priv = RV32EMU_PRIV_S;
+
+  m.cpu.x[17] = SBI_EXT_HSM;
+  m.cpu.x[16] = 2u; /* hart_status */
+  m.cpu.x[10] = 1u;
+  assert(rv32emu_handle_sbi_ecall(&m));
+  assert(m.cpu.x[10] == 0u);
+  assert(m.cpu.x[11] == 1u); /* stopped */
+
+  m.cpu.x[17] = SBI_EXT_HSM;
+  m.cpu.x[16] = 0u; /* hart_start */
+  m.cpu.x[10] = 1u;
+  m.cpu.x[11] = 0x80400000u;
+  m.cpu.x[12] = 0x1234u;
+  assert(rv32emu_handle_sbi_ecall(&m));
+  assert(m.cpu.x[10] == 0u);
+  assert(m.harts[1].running == true);
+  assert(m.harts[1].pc == 0x80400000u);
+  assert(m.harts[1].x[10] == 1u);
+  assert(m.harts[1].x[11] == 0x1234u);
+  assert(m.harts[1].priv == RV32EMU_PRIV_S);
+
+  m.cpu.x[17] = SBI_EXT_HSM;
+  m.cpu.x[16] = 2u; /* hart_status */
+  m.cpu.x[10] = 1u;
+  assert(rv32emu_handle_sbi_ecall(&m));
+  assert(m.cpu.x[10] == 0u);
+  assert(m.cpu.x[11] == 0u); /* started */
+
+  m.cpu.x[17] = SBI_EXT_HSM;
+  m.cpu.x[16] = 0u; /* hart_start again */
+  m.cpu.x[10] = 1u;
+  m.cpu.x[11] = 0x80410000u;
+  m.cpu.x[12] = 0x55u;
+  assert(rv32emu_handle_sbi_ecall(&m));
+  assert((int32_t)m.cpu.x[10] == -6);
 
   rv32emu_platform_destroy(&m);
 }
@@ -784,6 +834,7 @@ static void test_medeleg_exception_to_s(void) {
 
 int main(void) {
   test_sbi_shim_handle_and_ecall();
+  test_sbi_hsm_start_status();
   test_sv32_translate_and_ad_bits();
   test_mprv_translate_for_m_mode_data_access();
   test_sv32_permission_fault();

@@ -6,6 +6,7 @@
 
 int main(void) {
   rv32emu_machine_t m;
+  rv32emu_machine_t smp;
   rv32emu_options_t opts;
   uint32_t value = 0;
   uint32_t paddr;
@@ -67,17 +68,44 @@ int main(void) {
   assert(rv32emu_phys_write(&m, RV32EMU_CLINT_BASE + 0x0000u, 4, 0u));
   assert((rv32emu_csr_read(&m, CSR_MIP) & MIP_MSIP) == 0);
 
-  m.plat.plic_claim = 9u;
+  m.plat.plic_claim[0] = 9u;
   assert(rv32emu_phys_read(&m, RV32EMU_PLIC_BASE + 0x200004u, 4, &value));
   assert(value == 9u);
   assert(rv32emu_phys_write(&m, RV32EMU_PLIC_BASE + 0x200004u, 4, 9u));
-  assert(m.plat.plic_claim == 0u);
+  assert(m.plat.plic_claim[0] == 0u);
 
   rv32emu_csr_write(&m, CSR_SATP, 0x80000000u);
   assert(rv32emu_translate(&m, RV32EMU_DRAM_BASE + 0x1234u, RV32EMU_ACC_FETCH, &value));
   assert(value == RV32EMU_DRAM_BASE + 0x1234u);
 
   rv32emu_platform_destroy(&m);
+
+  rv32emu_default_options(&opts);
+  opts.hart_count = 2u;
+  assert(rv32emu_platform_init(&smp, &opts));
+
+  assert(rv32emu_phys_write(&smp, RV32EMU_CLINT_BASE + 0x0004u, 4, 1u));
+  assert((rv32emu_hart_cpu(&smp, 0u)->csr[CSR_MIP] & MIP_MSIP) == 0u);
+  assert((rv32emu_hart_cpu(&smp, 1u)->csr[CSR_MIP] & MIP_MSIP) != 0u);
+
+  assert(rv32emu_phys_write(&smp, RV32EMU_CLINT_BASE + 0x4008u, 4, 2u));
+  assert(rv32emu_phys_write(&smp, RV32EMU_CLINT_BASE + 0x400cu, 4, 0u));
+  rv32emu_step_timer(&smp);
+  assert((rv32emu_hart_cpu(&smp, 1u)->csr[CSR_MIP] & MIP_MTIP) == 0u);
+  rv32emu_step_timer(&smp);
+  assert((rv32emu_hart_cpu(&smp, 1u)->csr[CSR_MIP] & MIP_MTIP) != 0u);
+  assert((rv32emu_hart_cpu(&smp, 0u)->csr[CSR_MIP] & MIP_MTIP) == 0u);
+
+  assert(rv32emu_phys_write(&smp, RV32EMU_PLIC_BASE + 0x2100u, 4, (1u << 5)));
+  assert(rv32emu_phys_write(&smp, RV32EMU_PLIC_BASE + 0x1000u, 4, (1u << 5)));
+  assert((rv32emu_hart_cpu(&smp, 1u)->csr[CSR_MIP] & MIP_MEIP) != 0u);
+  assert((rv32emu_hart_cpu(&smp, 0u)->csr[CSR_MIP] & MIP_MEIP) == 0u);
+  assert(rv32emu_phys_read(&smp, RV32EMU_PLIC_BASE + 0x202004u, 4, &value));
+  assert(value == 5u);
+  assert(rv32emu_phys_write(&smp, RV32EMU_PLIC_BASE + 0x202004u, 4, 5u));
+  assert((rv32emu_hart_cpu(&smp, 1u)->csr[CSR_MIP] & MIP_MEIP) == 0u);
+
+  rv32emu_platform_destroy(&smp);
   puts("[OK] rv32emu platform test passed");
   return 0;
 }

@@ -10,6 +10,12 @@ MAX_INSTR="${MAX_INSTR:-1200000000}"
 APPEND="${APPEND:-console=ttyS0 earlycon=sbi rdinit=/init}"
 ALLOW_INIT_PANIC="${ALLOW_INIT_PANIC:-1}"
 CPU_ISA="${CPU_ISA:-rv32imafdc_zicsr_zifencei}"
+HART_COUNT="${HART_COUNT:-1}"
+DTB_HART_COUNT="${DTB_HART_COUNT:-${HART_COUNT}}"
+REQUIRE_LINUX_BANNER="${REQUIRE_LINUX_BANNER:-1}"
+REQUIRE_INIT_MARKER="${REQUIRE_INIT_MARKER:-1}"
+REQUIRE_SECONDARY_HART="${REQUIRE_SECONDARY_HART:-0}"
+SECONDARY_HART_ID="${SECONDARY_HART_ID:-1}"
 
 OPENSBI_FW="${OPENSBI_FW:-${ROOT_DIR}/out/opensbi/platform/generic/firmware/fw_dynamic.bin}"
 KERNEL_IMAGE="${KERNEL_IMAGE:-${ROOT_DIR}/out/linux/arch/riscv/boot/Image}"
@@ -43,12 +49,33 @@ check_marker() {
   echo "[OK] marker found: ${label}"
 }
 
+check_positive_int() {
+  local value="$1"
+  local label="$2"
+
+  if ! [[ "${value}" =~ ^[0-9]+$ ]] || (( value < 1 )); then
+    echo "[ERR] invalid ${label}: ${value}" >&2
+    exit 1
+  fi
+}
+
+generate_dtb_input() {
+  SMP="${DTB_HART_COUNT}" "${ROOT_DIR}/scripts/dump-virt-dtb.sh" "${DTB_IN}"
+}
+
 ensure_dtb_input() {
+  local last_hart=$((DTB_HART_COUNT - 1))
+
   if [[ -f "${DTB_IN}" ]]; then
+    if fdtget "${DTB_IN}" "/cpus/cpu@${last_hart}" reg >/dev/null 2>&1; then
+      return 0
+    fi
+    echo "[WARN] DTB cpu topology is too small for DTB_HART_COUNT=${DTB_HART_COUNT}; regenerating"
+    generate_dtb_input
     return 0
   fi
   echo "[WARN] DTB not found, trying auto-generate via dump-virt-dtb.sh"
-  "${ROOT_DIR}/scripts/dump-virt-dtb.sh" "${DTB_IN}"
+  generate_dtb_input
 }
 
 prepare_dtb() {
@@ -67,6 +94,8 @@ prepare_dtb() {
   local initrd_end_lo_hex
   local mem_size_hi_hex
   local mem_size_lo_hex
+  local hart
+  local cpu_node
 
   mkdir -p "$(dirname "${SMOKE_DTB}")"
   cp "${DTB_IN}" "${SMOKE_DTB}"
@@ -86,7 +115,14 @@ prepare_dtb() {
     "${initrd_end_hi_hex}" "${initrd_end_lo_hex}"
 
   # Constrain ISA string to currently implemented extension subset.
-  fdtput -t s "${SMOKE_DTB}" /cpus/cpu@0 riscv,isa "${CPU_ISA}"
+  for ((hart = 0; hart < HART_COUNT; hart++)); do
+    cpu_node="/cpus/cpu@${hart}"
+    if ! fdtget "${SMOKE_DTB}" "${cpu_node}" reg >/dev/null 2>&1; then
+      echo "[ERR] DTB missing cpu node: ${cpu_node} (HART_COUNT=${HART_COUNT})" >&2
+      exit 1
+    fi
+    fdtput -t s "${SMOKE_DTB}" "${cpu_node}" riscv,isa "${CPU_ISA}"
+  done
 
   # Keep DT memory size aligned with --memory-mb passed to emulator.
   fdtput -t x "${SMOKE_DTB}" /memory@80000000 reg 0 80000000 \
@@ -117,6 +153,18 @@ if ! command -v fdtput >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v fdtget >/dev/null 2>&1; then
+  echo "[ERR] missing command: fdtget (from device-tree-compiler package)" >&2
+  exit 1
+fi
+
+check_positive_int "${HART_COUNT}" "HART_COUNT"
+check_positive_int "${DTB_HART_COUNT}" "DTB_HART_COUNT"
+
+if [[ "${DTB_HART_COUNT}" != "${HART_COUNT}" ]]; then
+  echo "[WARN] DTB_HART_COUNT (${DTB_HART_COUNT}) != HART_COUNT (${HART_COUNT})"
+fi
+
 check_file "${EMU_BIN}"
 check_file "${OPENSBI_FW}"
 check_file "${KERNEL_IMAGE}"
@@ -129,7 +177,7 @@ prepare_dtb
 
 mkdir -p "$(dirname "${LOG_PATH}")"
 echo "[INFO] emulator smoke log: ${LOG_PATH}"
-echo "[INFO] running ${EMU_BIN} for up to ${TIMEOUT_SEC}s"
+echo "[INFO] running ${EMU_BIN} for up to ${TIMEOUT_SEC}s (harts=${HART_COUNT})"
 
 EMU_CMD=(
   "${EMU_BIN}"
@@ -143,6 +191,7 @@ EMU_CMD=(
   --initrd-load "${INITRD_LOAD}"
   --fw-dynamic-info "${FW_DYNAMIC_INFO}"
   --memory-mb "${MEMORY_MB}"
+  --hart-count "${HART_COUNT}"
   --max-instr "${MAX_INSTR}"
   --boot-mode s
 )
@@ -165,9 +214,19 @@ if [[ "${EMU_RC}" -ne 0 && "${EMU_RC}" -ne 124 && "${EMU_RC}" -ne 137 ]]; then
 fi
 
 check_marker "OpenSBI v" "OpenSBI banner"
-check_marker "Linux version" "Linux banner"
-check_marker "Kernel command line:" "kernel cmdline"
-check_marker "Run /bin/sh as init process|Run /init as init process" "init handoff"
+
+if [[ "${REQUIRE_LINUX_BANNER}" == "1" ]]; then
+  check_marker "Linux version" "Linux banner"
+  check_marker "Kernel command line:" "kernel cmdline"
+fi
+
+if [[ "${REQUIRE_INIT_MARKER}" == "1" ]]; then
+  check_marker "Run /bin/sh as init process|Run /init as init process" "init handoff"
+fi
+
+if [[ "${REQUIRE_SECONDARY_HART}" == "1" ]]; then
+  check_marker "hart${SECONDARY_HART_ID} state: running=1" "hart${SECONDARY_HART_ID} running"
+fi
 
 if grep -Eq "Kernel panic - not syncing|No working init found" "${LOG_PATH}"; then
   if [[ "${ALLOW_INIT_PANIC}" == "1" ]]; then

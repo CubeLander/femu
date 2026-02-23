@@ -26,10 +26,12 @@ typedef struct {
   uint32_t initrd_load_addr;
   uint32_t fw_dynamic_info_addr;
   uint32_t memory_mb;
+  uint32_t hart_count;
   uint64_t max_instructions;
   bool has_fw_dynamic_info_addr;
   bool trace;
   bool boot_s_mode;
+  bool sbi_shim;
   bool use_fw_dynamic;
   bool interactive;
 } cli_options_t;
@@ -48,6 +50,8 @@ static void usage(FILE *out, const char *prog) {
           "  --fw-dynamic-info <hex>     FW_DYNAMIC info address (default kernel-load-0x1000)\n"
           "  --no-fw-dynamic             Boot OpenSBI without a2 fw_dynamic_info\n"
           "  --boot-mode <s|m>           OpenSBI next mode (default s)\n"
+          "  --sbi-shim                  Intercept S-mode SBI ecalls in emulator\n"
+          "  --hart-count <num>          Hart count (default 1, max 4)\n"
           "  --memory-mb <num>           RAM size in MiB (default 256)\n"
           "  --max-instr <num>           Max instructions (default 50000000)\n"
           "  --interactive               Enable stdin -> UART interactive mode\n"
@@ -116,6 +120,7 @@ static bool parse_args(int argc, char **argv, cli_options_t *cli) {
   cli->kernel_load_addr = RV32EMU_DEFAULT_KERNEL_LOAD;
   cli->dtb_load_addr = RV32EMU_DEFAULT_DTB_LOAD;
   cli->initrd_load_addr = RV32EMU_DEFAULT_INITRD_LOAD;
+  cli->hart_count = RV32EMU_DEFAULT_HART_COUNT;
   cli->memory_mb = RV32EMU_DEFAULT_RAM_MB;
   cli->max_instructions = RV32EMU_DEFAULT_MAX_INSTR;
   cli->boot_s_mode = true;
@@ -137,6 +142,10 @@ static bool parse_args(int argc, char **argv, cli_options_t *cli) {
 
     if (!strcmp(arg, "--trace")) {
       cli->trace = true;
+      continue;
+    }
+    if (!strcmp(arg, "--sbi-shim")) {
+      cli->sbi_shim = true;
       continue;
     }
     if (!strcmp(arg, "--interactive")) {
@@ -191,6 +200,13 @@ static bool parse_args(int argc, char **argv, cli_options_t *cli) {
     } else if (!strcmp(arg, "--memory-mb")) {
       if (!parse_u32(val, &cli->memory_mb) || cli->memory_mb == 0u) {
         fprintf(stderr, "[ERR] invalid --memory-mb: %s\n", val);
+        return false;
+      }
+    } else if (!strcmp(arg, "--hart-count")) {
+      if (!parse_u32(val, &cli->hart_count) || cli->hart_count == 0u ||
+          cli->hart_count > RV32EMU_MAX_HARTS) {
+        fprintf(stderr, "[ERR] invalid --hart-count: %s (range: 1..%u)\n", val,
+                RV32EMU_MAX_HARTS);
         return false;
       }
     } else if (!strcmp(arg, "--max-instr")) {
@@ -330,7 +346,7 @@ static void rv32emu_pump_stdin_to_uart(rv32emu_machine_t *m) {
 static uint64_t rv32emu_run_interactive(rv32emu_machine_t *m, uint64_t max_instructions) {
   uint64_t executed = 0;
 
-  while (m->cpu.running && executed < max_instructions) {
+  while (rv32emu_any_hart_running(m) && executed < max_instructions) {
     uint64_t remaining = max_instructions - executed;
     uint64_t slice = remaining > RV32EMU_RUN_SLICE_INSTR ? RV32EMU_RUN_SLICE_INSTR : remaining;
     int delta;
@@ -352,6 +368,7 @@ int main(int argc, char **argv) {
   cli_options_t cli;
   rv32emu_machine_t m;
   rv32emu_options_t opts;
+  rv32emu_cpu_t *hart_cpu;
   uint32_t opensbi_entry = 0;
   uint32_t kernel_entry = 0;
   bool opensbi_entry_valid = false;
@@ -371,8 +388,9 @@ int main(int argc, char **argv) {
   rv32emu_default_options(&opts);
   opts.ram_mb = cli.memory_mb;
   opts.trace = cli.trace;
-  opts.enable_sbi_shim = false;
+  opts.enable_sbi_shim = cli.sbi_shim;
   opts.boot_s_mode = cli.boot_s_mode;
+  opts.hart_count = cli.hart_count;
   opts.max_instructions = cli.max_instructions;
   opts.kernel_load_addr = cli.kernel_load_addr;
   opts.dtb_load_addr = cli.dtb_load_addr;
@@ -425,19 +443,27 @@ int main(int argc, char **argv) {
     }
   }
 
-  m.cpu.pc = opensbi_entry;
-  m.cpu.priv = RV32EMU_PRIV_M;
-  m.cpu.x[10] = 0u;               /* a0 = hartid */
-  m.cpu.x[11] = cli.dtb_load_addr; /* a1 = dtb */
-  m.cpu.x[12] = cli.use_fw_dynamic ? cli.fw_dynamic_info_addr : 0u; /* a2 */
+  for (uint32_t hart = 0; hart < m.hart_count; hart++) {
+    hart_cpu = rv32emu_hart_cpu(&m, hart);
+    if (hart_cpu == NULL) {
+      continue;
+    }
+    hart_cpu->pc = opensbi_entry;
+    hart_cpu->priv = RV32EMU_PRIV_M;
+    hart_cpu->running = (hart == 0u);
+    hart_cpu->x[10] = hart; /* a0 = hartid */
+    hart_cpu->x[11] = cli.dtb_load_addr; /* a1 = dtb */
+    hart_cpu->x[12] = cli.use_fw_dynamic ? cli.fw_dynamic_info_addr : 0u; /* a2 */
+  }
 
   fprintf(stderr,
           "[INFO] rv32emu boot start\n"
           "[INFO] opensbi=%s @0x%08x entry=0x%08x\n"
           "[INFO] kernel=%s @0x%08x entry=0x%08x\n"
+          "[INFO] harts=%u\n"
           "[INFO] dtb=%s @0x%08x\n",
           cli.opensbi_path, cli.opensbi_load_addr, opensbi_entry, cli.kernel_path,
-          cli.kernel_load_addr, kernel_entry, cli.dtb_path, cli.dtb_load_addr);
+          cli.kernel_load_addr, kernel_entry, m.hart_count, cli.dtb_path, cli.dtb_load_addr);
   if (cli.initrd_path != NULL) {
     fprintf(stderr, "[INFO] initrd=%s @0x%08x size=%u\n", cli.initrd_path, cli.initrd_load_addr,
             initrd_size);
@@ -469,14 +495,26 @@ int main(int argc, char **argv) {
   fprintf(stderr,
           "[INFO] rv32emu stop: executed=%" PRIu64 " running=%d pc=0x%08x priv=%u mcause=0x%08x "
           "mepc=0x%08x mtval=0x%08x\n",
-          executed, m.cpu.running ? 1 : 0, m.cpu.pc, (unsigned)m.cpu.priv, mcause, mepc,
+          executed, rv32emu_any_hart_running(&m) ? 1 : 0, m.cpu.pc, (unsigned)m.cpu.priv, mcause,
+          mepc,
           mtval);
 
-  rv32emu_platform_destroy(&m);
+  for (uint32_t hart = 0; hart < m.hart_count; hart++) {
+    rv32emu_cpu_t *cpu = rv32emu_hart_cpu(&m, hart);
+    if (cpu == NULL) {
+      continue;
+    }
+    fprintf(stderr,
+            "[INFO] hart%u state: running=%u pc=0x%08x priv=%u mcause=0x%08x mepc=0x%08x\n",
+            hart, cpu->running ? 1u : 0u, cpu->pc, (unsigned)cpu->priv, cpu->csr[CSR_MCAUSE],
+            cpu->csr[CSR_MEPC]);
+  }
 
-  if (!m.cpu.running && mcause != RV32EMU_EXC_BREAKPOINT) {
+  if (!rv32emu_any_hart_running(&m) && mcause != RV32EMU_EXC_BREAKPOINT) {
+    rv32emu_platform_destroy(&m);
     return 2;
   }
 
+  rv32emu_platform_destroy(&m);
   return 0;
 }

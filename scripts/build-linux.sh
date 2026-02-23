@@ -7,8 +7,15 @@ OUT_DIR="${OUT_DIR:-${ROOT_DIR}/out/linux}"
 JOBS="${JOBS:-$(nproc)}"
 ARCH_NAME="${ARCH_NAME:-riscv}"
 CROSS_PREFIX="${CROSS_COMPILE:-}"
-CONFIG_FRAGMENT="${ROOT_DIR}/scripts/config/linux-rv32-minimal.config"
+BASE_CONFIG_FRAGMENT="${BASE_CONFIG_FRAGMENT:-${ROOT_DIR}/scripts/config/linux-rv32-minimal.config}"
+EXTRA_CONFIG_FRAGMENT="${EXTRA_CONFIG_FRAGMENT:-}"
+EXPECT_SMP="${EXPECT_SMP:-0}"
 BASE_DEFCONFIG="${BASE_DEFCONFIG:-rv32_defconfig}"
+
+# Backward-compatible alias used by older invocations.
+if [[ -n "${CONFIG_FRAGMENT:-}" ]]; then
+  BASE_CONFIG_FRAGMENT="${CONFIG_FRAGMENT}"
+fi
 
 detect_cross_prefix() {
   if [[ -n "${CROSS_PREFIX}" ]]; then
@@ -59,10 +66,30 @@ if [[ "${CONFIG_NEEDS_INIT}" == "1" ]]; then
   make -C "${LINUX_SRC}" O="${OUT_DIR}" ARCH="${ARCH_NAME}" CROSS_COMPILE="${CROSS_PREFIX}" "${DEFCONFIG_TARGET}"
 fi
 
-if [[ -f "${CONFIG_FRAGMENT}" ]]; then
-  echo "[INFO] merging rv32 minimal fragment"
+MERGE_FRAGMENTS=()
+if [[ -f "${BASE_CONFIG_FRAGMENT}" ]]; then
+  MERGE_FRAGMENTS+=( "${BASE_CONFIG_FRAGMENT}" )
+fi
+
+if [[ -n "${EXTRA_CONFIG_FRAGMENT}" ]]; then
+  # shellcheck disable=SC2206
+  EXTRA_FRAGMENTS=( ${EXTRA_CONFIG_FRAGMENT} )
+  for frag in "${EXTRA_FRAGMENTS[@]}"; do
+    if [[ ! -f "${frag}" ]]; then
+      echo "[ERR] kernel config fragment not found: ${frag}" >&2
+      exit 1
+    fi
+    MERGE_FRAGMENTS+=( "${frag}" )
+  done
+fi
+
+if (( ${#MERGE_FRAGMENTS[@]} > 0 )); then
+  echo "[INFO] merging kernel config fragments:"
+  for frag in "${MERGE_FRAGMENTS[@]}"; do
+    echo "  - ${frag}"
+  done
   "${LINUX_SRC}/scripts/kconfig/merge_config.sh" -m -O "${OUT_DIR}" \
-    "${OUT_DIR}/.config" "${CONFIG_FRAGMENT}"
+    "${OUT_DIR}/.config" "${MERGE_FRAGMENTS[@]}"
   make -C "${LINUX_SRC}" O="${OUT_DIR}" ARCH="${ARCH_NAME}" CROSS_COMPILE="${CROSS_PREFIX}" olddefconfig
 fi
 
@@ -78,8 +105,13 @@ if ! grep -q "^CONFIG_FPU=y" "${OUT_DIR}/.config"; then
   exit 1
 fi
 
+if [[ "${EXPECT_SMP}" == "1" ]] && ! grep -q "^CONFIG_SMP=y" "${OUT_DIR}/.config"; then
+  echo "[ERR] kernel config has CONFIG_SMP disabled, but EXPECT_SMP=1." >&2
+  exit 1
+fi
+
 echo "[INFO] kernel config confirms rv32"
-if [[ -f "${CONFIG_FRAGMENT}" ]]; then
+if (( ${#MERGE_FRAGMENTS[@]} > 0 )); then
   # Informative check so users can spot command-line drift early.
   if ! grep -q '^CONFIG_CMDLINE="console=ttyS0 earlycon=sbi rdinit=/init"' "${OUT_DIR}/.config"; then
     echo "[WARN] CONFIG_CMDLINE differs from expected minimal fragment."

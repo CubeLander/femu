@@ -32,10 +32,19 @@
 #define SBI_ERR_FAILED (-1)
 #define SBI_ERR_NOT_SUPPORTED (-2)
 #define SBI_ERR_INVALID_PARAM (-3)
+#define SBI_ERR_ALREADY_AVAILABLE (-6)
+
+#define SBI_HSM_STATE_STARTED 0u
+#define SBI_HSM_STATE_STOPPED 1u
 
 #define SBI_IMPL_ID_RV32EMU 0x52563332u /* "RV32" */
 #define SBI_IMPL_VERSION 0x00010000u
 #define SBI_SPEC_VERSION_0_2 0x00000002u
+
+static uint32_t rv32emu_default_misa_value(void) {
+  return (1u << 30) | (1u << 0) | (1u << 2) | (1u << 3) | (1u << 5) | (1u << 8) |
+         (1u << 12) | (1u << 18) | (1u << 20);
+}
 
 static void rv32emu_sbi_set_legacy_ret(rv32emu_machine_t *m, int32_t value) {
   m->cpu.x[RV32EMU_REG_A0] = (uint32_t)value;
@@ -66,8 +75,23 @@ static bool rv32emu_sbi_is_supported_extension(uint32_t eid) {
   }
 }
 
+static uint32_t rv32emu_sbi_current_hartid(const rv32emu_machine_t *m) {
+  uint32_t hartid;
+
+  if (m == NULL || m->hart_count == 0u) {
+    return 0u;
+  }
+
+  hartid = m->cpu.csr[CSR_MHARTID];
+  if (hartid >= m->hart_count) {
+    return 0u;
+  }
+  return hartid;
+}
+
 static void rv32emu_sbi_sync_timer_pending(rv32emu_machine_t *m) {
-  bool expired = m->plat.mtime >= m->plat.mtimecmp;
+  uint32_t hartid = rv32emu_sbi_current_hartid(m);
+  bool expired = m->plat.mtime >= m->plat.clint_mtimecmp[hartid];
 
   if (m->opts.enable_sbi_shim) {
     if (expired) {
@@ -87,7 +111,8 @@ static void rv32emu_sbi_sync_timer_pending(rv32emu_machine_t *m) {
 }
 
 static void rv32emu_sbi_set_timer(rv32emu_machine_t *m, uint64_t stime_value) {
-  m->plat.mtimecmp = stime_value;
+  uint32_t hartid = rv32emu_sbi_current_hartid(m);
+  m->plat.clint_mtimecmp[hartid] = stime_value;
   rv32emu_sbi_sync_timer_pending(m);
 }
 
@@ -169,12 +194,31 @@ static bool rv32emu_sbi_handle_time(rv32emu_machine_t *m, uint32_t fid) {
 }
 
 static bool rv32emu_sbi_handle_ipi(rv32emu_machine_t *m, uint32_t fid) {
+  uint32_t hart_mask;
+  uint32_t hart_base;
+  uint32_t bit;
+
   if (fid != 0u) {
     rv32emu_sbi_set_ret(m, SBI_ERR_NOT_SUPPORTED, 0);
     return true;
   }
 
-  m->cpu.csr[CSR_MIP] |= MIP_SSIP;
+  hart_mask = m->cpu.x[RV32EMU_REG_A0];
+  hart_base = m->cpu.x[RV32EMU_REG_A1];
+
+  for (bit = 0u; bit < 32u; bit++) {
+    rv32emu_cpu_t *target;
+    uint32_t hartid;
+
+    if ((hart_mask & (1u << bit)) == 0u) {
+      continue;
+    }
+    hartid = hart_base + bit;
+    target = rv32emu_hart_cpu(m, hartid);
+    if (target != NULL) {
+      target->csr[CSR_MIP] |= MIP_SSIP;
+    }
+  }
   rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS, 0);
   return true;
 }
@@ -187,17 +231,58 @@ static bool rv32emu_sbi_handle_rfence(rv32emu_machine_t *m, uint32_t fid) {
 
 static bool rv32emu_sbi_handle_hsm(rv32emu_machine_t *m, uint32_t fid) {
   uint32_t hartid = m->cpu.x[RV32EMU_REG_A0];
+  rv32emu_cpu_t *target = rv32emu_hart_cpu(m, hartid);
 
   switch (fid) {
-  case 0u: /* hart_start */
-    rv32emu_sbi_set_ret(m, SBI_ERR_NOT_SUPPORTED, 0);
+  case 0u: { /* hart_start */
+    bool expired;
+
+    if (target == NULL) {
+      rv32emu_sbi_set_ret(m, SBI_ERR_INVALID_PARAM, 0);
+      return true;
+    }
+    if (target->running) {
+      rv32emu_sbi_set_ret(m, SBI_ERR_ALREADY_AVAILABLE, 0);
+      return true;
+    }
+    memset(target, 0, sizeof(*target));
+    memcpy(target->csr, m->cpu.csr, sizeof(target->csr));
+    target->pc = m->cpu.x[RV32EMU_REG_A1];
+    target->x[RV32EMU_REG_A0] = hartid;
+    target->x[RV32EMU_REG_A1] = m->cpu.x[RV32EMU_REG_A2];
+    target->priv = RV32EMU_PRIV_S;
+    target->running = true;
+    target->trace = m->opts.trace;
+    target->csr[CSR_MHARTID] = hartid;
+    target->csr[CSR_MISA] = rv32emu_default_misa_value();
+    target->csr[CSR_TIME] = (uint32_t)m->plat.mtime;
+    target->csr[CSR_MIP] &= ~(MIP_MSIP | MIP_SSIP | MIP_STIP | MIP_MTIP | MIP_SEIP | MIP_MEIP);
+    if (m->plat.clint_msip[hartid] != 0u) {
+      target->csr[CSR_MIP] |= MIP_MSIP;
+    }
+    expired = m->plat.mtime >= m->plat.clint_mtimecmp[hartid];
+    if (m->opts.enable_sbi_shim) {
+      if (expired) {
+        target->csr[CSR_MIP] |= MIP_STIP;
+      }
+      target->csr[CSR_MIP] &= ~MIP_MTIP;
+    } else if (expired) {
+      target->csr[CSR_MIP] |= MIP_MTIP;
+    }
+    rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS, 0);
     return true;
+  }
   case 1u: /* hart_stop */
     m->cpu.running = false;
     rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS, 0);
     return true;
   case 2u: /* hart_status */
-    rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS, (hartid == 0u) ? 0u : 1u);
+    if (target == NULL) {
+      rv32emu_sbi_set_ret(m, SBI_ERR_INVALID_PARAM, 0);
+      return true;
+    }
+    rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS,
+                        target->running ? SBI_HSM_STATE_STARTED : SBI_HSM_STATE_STOPPED);
     return true;
   case 3u: /* hart_suspend */
     rv32emu_sbi_set_ret(m, SBI_ERR_NOT_SUPPORTED, 0);
@@ -223,7 +308,7 @@ bool rv32emu_handle_sbi_ecall(rv32emu_machine_t *m) {
   uint32_t eid;
   uint32_t fid;
 
-  if (m == NULL || !m->opts.enable_sbi_shim || m->cpu.priv == RV32EMU_PRIV_U) {
+  if (m == NULL || !m->opts.enable_sbi_shim || m->cpu.priv != RV32EMU_PRIV_S) {
     return false;
   }
 

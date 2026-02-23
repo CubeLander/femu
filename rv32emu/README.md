@@ -41,6 +41,7 @@ Interactive UART console (stdin -> UART RX):
   --kernel out/linux/arch/riscv/boot/Image \
   --dtb out/smoke/virt-rv32-smoke.dtb \
   --initrd out/rootfs/initramfs.cpio.gz \
+  --hart-count 1 \
   --interactive \
   --max-instr 1200000000
 ```

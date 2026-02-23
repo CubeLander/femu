@@ -1181,8 +1181,13 @@ static bool rv32emu_exec_one(rv32emu_machine_t *m) {
 
 int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
   uint64_t executed = 0;
+  uint32_t next_hart = 0;
 
   if (m == NULL) {
+    return -1;
+  }
+
+  if (m->hart_count == 0u || m->hart_count > RV32EMU_MAX_HARTS) {
     return -1;
   }
 
@@ -1190,21 +1195,54 @@ int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
     max_instructions = RV32EMU_DEFAULT_MAX_INSTR;
   }
 
-  while (m->cpu.running && executed < max_instructions) {
-    if (rv32emu_check_pending_interrupt(m)) {
-      if (!m->cpu.running) {
+  while (executed < max_instructions) {
+    bool progressed = false;
+    uint32_t checked;
+
+    for (checked = 0u; checked < m->hart_count; checked++) {
+      uint32_t hart = (next_hart + checked) % m->hart_count;
+
+      if (!m->harts[hart].running) {
+        continue;
+      }
+
+      progressed = true;
+      m->active_hart = hart;
+
+      if (hart != 0u) {
+        rv32emu_cpu_t tmp = m->harts[0];
+        m->harts[0] = m->harts[hart];
+        m->harts[hart] = tmp;
+      }
+
+      if (rv32emu_check_pending_interrupt(m)) {
+        if (hart != 0u) {
+          rv32emu_cpu_t tmp = m->harts[0];
+          m->harts[0] = m->harts[hart];
+          m->harts[hart] = tmp;
+        }
+        m->active_hart = 0u;
+        next_hart = (hart + 1u) % m->hart_count;
         break;
       }
-      continue;
+
+      if (rv32emu_exec_one(m)) {
+        executed += 1;
+      }
+
+      if (hart != 0u) {
+        rv32emu_cpu_t tmp = m->harts[0];
+        m->harts[0] = m->harts[hart];
+        m->harts[hart] = tmp;
+      }
+      m->active_hart = 0u;
+      next_hart = (hart + 1u) % m->hart_count;
+      break;
     }
 
-    if (!rv32emu_exec_one(m)) {
-      if (!m->cpu.running) {
-        break;
-      }
-      continue;
+    if (!progressed) {
+      break;
     }
-    executed += 1;
   }
 
   return (int)executed;

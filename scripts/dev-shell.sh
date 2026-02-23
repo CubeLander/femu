@@ -5,6 +5,32 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE_TAG="${IMAGE_TAG:-ics2019-dev:latest}"
 DOC_WSL="${ROOT_DIR}/docs/migration/wsl2-docker-setup.md"
 DOC_PROXY="${ROOT_DIR}/docs/migration/network-proxy.md"
+DOCKERFILE_PATH="${ROOT_DIR}/docker/Dockerfile.dev"
+IMAGE_HASH_LABEL="org.femu.dev.dockerfile-sha256"
+
+hash_file_sha256() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${file}" | awk '{print $1}'
+    return 0
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "${file}" | awk '{print $1}'
+    return 0
+  fi
+
+  return 1
+}
+
+image_exists() {
+  docker image inspect "${IMAGE_TAG}" >/dev/null 2>&1
+}
+
+image_dockerfile_hash() {
+  docker image inspect \
+    --format "{{ index .Config.Labels \"${IMAGE_HASH_LABEL}\" }}" \
+    "${IMAGE_TAG}" 2>/dev/null || true
+}
 
 is_wsl() {
   grep -qiE "(microsoft|wsl)" /proc/sys/kernel/osrelease 2>/dev/null
@@ -91,11 +117,51 @@ fi
 setup_proxy_env
 collect_proxy_args
 
-echo "[INFO] building dev image: ${IMAGE_TAG}"
-docker build "${BUILD_PROXY_ARGS[@]}" \
-  -f "${ROOT_DIR}/docker/Dockerfile.dev" \
-  -t "${IMAGE_TAG}" \
-  "${ROOT_DIR}"
+should_build=0
+dockerfile_hash=""
+rebuild_reason=""
+force_rebuild="${FORCE_REBUILD:-0}"
+hash_available=0
+
+if dockerfile_hash="$(hash_file_sha256 "${DOCKERFILE_PATH}")"; then
+  hash_available=1
+else
+  echo "[WARN] sha256sum/shasum not found, fallback to existing image without hash check."
+fi
+
+if [[ "${force_rebuild}" == "1" ]]; then
+  should_build=1
+  rebuild_reason="FORCE_REBUILD=1"
+elif ! image_exists; then
+  should_build=1
+  rebuild_reason="image not found"
+else
+  if [[ "${hash_available}" == "1" ]]; then
+    current_image_hash="$(image_dockerfile_hash)"
+    if [[ -z "${current_image_hash}" ]]; then
+      should_build=1
+      rebuild_reason="image hash label missing"
+    elif [[ "${current_image_hash}" != "${dockerfile_hash}" ]]; then
+      should_build=1
+      rebuild_reason="Dockerfile changed"
+    fi
+  fi
+fi
+
+if [[ "${should_build}" == "1" ]]; then
+  if [[ -z "${dockerfile_hash}" ]]; then
+    dockerfile_hash="unknown"
+  fi
+  echo "[INFO] building dev image: ${IMAGE_TAG} (${rebuild_reason})"
+  docker build "${BUILD_PROXY_ARGS[@]}" \
+    --label "${IMAGE_HASH_LABEL}=${dockerfile_hash}" \
+    -f "${DOCKERFILE_PATH}" \
+    -t "${IMAGE_TAG}" \
+    "${ROOT_DIR}/docker"
+else
+  echo "[INFO] reuse cached dev image: ${IMAGE_TAG}"
+  echo "[INFO] set FORCE_REBUILD=1 to rebuild manually"
+fi
 
 echo "[INFO] entering dev shell"
 docker run --rm -it \

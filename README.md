@@ -36,6 +36,7 @@ make install-rv32-toolchain
 make build-busybox
 make build-busybox-rv32
 make build-linux
+make build-linux-smp
 make build-opensbi
 make build-rootfs
 make build-all
@@ -45,6 +46,7 @@ make smoke-qemu-strict
 make smoke-emulator
 make smoke-emulator-strict
 make smoke-emulator-interactive
+make smoke-emulator-smp
 make check-boot-contract
 make rv32emu-test
 make rv32emu-bin
@@ -76,6 +78,15 @@ make install-rv32-toolchain
 make build-busybox-rv32
 make smoke-qemu-strict
 ```
+
+SMP kernel bring-up smoke (2 harts):
+
+```bash
+make build-linux-smp
+make smoke-emulator-smp
+```
+
+`smoke-emulator-smp` currently validates OpenSBI boot plus `hart1 state: running=1` in emulator log.
 
 If cross compiler is missing, run:
 

@@ -160,13 +160,50 @@
      - `make smoke-emulator` 通过
      - `make smoke-emulator-strict` 通过（进入 `/bin/sh`，无 panic）
 
-## 4. 推荐里程碑
+## 4. 阶段 G：SMP 基础框架（进行中）
+已完成（2026-02-22）：
+1. 多 hart 数据结构骨架：
+   - `rv32emu_machine_t` 新增 `harts[]/hart_count/active_hart`。
+   - `rv32emu_options_t` 新增 `hart_count`，默认 `1`，上限 `4`。
+2. 运行时调度骨架：
+   - `rv32emu_run()` 改为按 hart 轮转（单线程）调度。
+   - 维持单核默认行为不变，现有 smoke 回归通过。
+3. SBI HSM 最小语义：
+   - `hart_start/hart_stop/hart_status` 打通基础状态流。
+   - 新增单测覆盖 `HSM start/status`。
+4. 工具链入口：
+   - `rv32emu_main` 新增 `--hart-count` 参数。
+5. CLINT per-hart：
+   - `msip[]/mtimecmp[]` 按 hart 建模，`step_timer` 按 hart 同步 `TIME/MTIP(STIP)`。
+6. PLIC per-context：
+   - 以 `2 * hart_count` 建模 `enable/claim/complete`，支持多 context 寄存器地址解码。
+7. 回归测试补强：
+   - `test_platform` 新增多核 CLINT/PLIC 场景（hart1 的 `MSIP/MTIMECMP/MEIP`）。
+8. 首轮 `CONFIG_SMP=y` bring-up 链路已打通：
+   - 新增内核配置片段：`scripts/config/linux-rv32-smp.config`
+   - 新增构建目标：`make build-linux-smp`
+   - 新增 smoke 目标：`make smoke-emulator-smp`
+   - 次核可被 OpenSBI+CLINT `MSIP` 路径拉起（`hart1 state: running=1`）。
+   - 参考日志：`docs/logs/2026-02-22-emulator-smp-hart1-pass.log`
+
+当前限制：
+1. IPI/RFENCE 仍为最小实现，不足以支撑完整 Linux SMP。
+2. 当前调度为单线程轮转，不包含 host 并行。
+3. PLIC 仍是最小子集（仅低 32 路中断、priority/threshold 语义未完整建模）。
+4. SMP 场景的 Linux 串口日志尚不稳定（`Linux version` marker 可能缺失），需要补充可观测性与根因定位。
+
+下一步（阶段 G-2 / G-3）：
+1. 在现有 `MSIP` 唤醒路径基础上，补齐 IPI/RFENCE 的 hart-mask 语义与状态一致性检查。
+2. 定位 SMP 下 Linux 串口 marker 丢失问题，恢复 `Linux banner/init handoff` 级别的自动化验收。
+3. 扩展 PLIC 语义并引入更多中断源做回归。
+
+## 5. 推荐里程碑
 1. M1：OpenSBI banner 出现。
 2. M2：Linux banner + cmdline 出现。
 3. M3：`Run /init as init process`。
 4. M4：strict smoke pass（进入 `~ #`）。
 
-## 5. 多核问题：是否现在就做？
+## 6. 多核问题：是否现在就做？
 结论（建议）：
 - 现在先不做多核作为前置。
 - 先把单核 strict smoke 跑稳，再进入多核阶段。
@@ -176,7 +213,7 @@
 2. 多核会显著放大调试复杂度（中断、同步、时序、竞态），会拖慢首个端到端闭环。
 3. 单核跑通后，多核问题可拆分成独立里程碑，风险更可控。
 
-## 6. 如果做多核，需要额外关心什么
+## 7. 如果做多核，需要额外关心什么
 1. 每个 hart 的独立状态
 - 独立 PC/寄存器/CSR/priv/trap 上下文。
 - 每个 hart 的中断挂起与使能状态。
@@ -209,12 +246,12 @@
 - 多核仿真步进策略（轮询/时间片/事件驱动）要可复现。
 - 必须有 per-hart trace 与时序日志，不然很难定位竞态 bug。
 
-## 7. 多核实施建议（在单核稳定后）
+## 8. 多核实施建议（在单核稳定后）
 1. SMP-1：2 核启动，但次核先 park（验证 HSM 基础链路）。
 2. SMP-2：2 核都进入 Linux，跑最小 SMP 启动验证。
 3. SMP-3：压测锁/中断/定时器，补齐稳定性与回归测试。
 
-## 8. 本计划对应的仓库落点
+## 9. 本计划对应的仓库落点
 - emulator scaffold：`rv32emu/`
 - QEMU 基线与复盘：`docs/qemu-smoke/rv32-qemu-smoke-retrospective.md`
 - 参考日志：`docs/logs/2026-02-22-qemu-smoke-success.log`

@@ -7,6 +7,8 @@
 - Emulator 第一轮日志：`docs/logs/2026-02-22-emulator-smoke-round1.log`
 - Emulator 第二轮日志：`docs/logs/2026-02-22-emulator-smoke-round2.log`
 - Emulator strict pass 日志：`docs/logs/2026-02-22-emulator-smoke-strict-pass.log`
+- Emulator SMP smoke 日志：`docs/logs/2026-02-22-emulator-smp-smoke.log`
+- Emulator SMP 次核拉起日志：`docs/logs/2026-02-22-emulator-smp-hart1-pass.log`
 
 Quick checks:
 
@@ -15,3 +17,5 @@ Quick checks:
 - `make rv32emu-bin`
 - `make smoke-emulator`
 - `make smoke-emulator-strict`
+- `make build-linux-smp`
+- `make smoke-emulator-smp`

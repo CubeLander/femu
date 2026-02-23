@@ -23,15 +23,17 @@
 #define UART_LSR_TEMT (1u << 6)
 #define UART_PLIC_IRQ 10u
 
-#define CLINT_MSIP 0x0000u
-#define CLINT_MTIMECMP 0x4000u
+#define CLINT_MSIP_BASE 0x0000u
+#define CLINT_MTIMECMP_BASE 0x4000u
 #define CLINT_MTIME 0xbff8u
 
 #define PLIC_PENDING 0x1000u
-#define PLIC_ENABLE0 0x2000u
-#define PLIC_ENABLE1 0x2080u
-#define PLIC_CTX0_CLAIM 0x200004u
-#define PLIC_CTX1_CLAIM 0x201004u
+#define PLIC_ENABLE_BASE 0x2000u
+#define PLIC_ENABLE_STRIDE 0x80u
+#define PLIC_CONTEXT_BASE 0x200000u
+#define PLIC_CONTEXT_STRIDE 0x1000u
+#define PLIC_CONTEXT_THRESHOLD 0x0u
+#define PLIC_CONTEXT_CLAIM 0x4u
 
 #define VIRTIO_MMIO_BASE 0x10001000u
 #define VIRTIO_MMIO_SIZE 0x00008000u
@@ -79,20 +81,76 @@ static bool rv32emu_write_u32_le(uint8_t *p, int len, uint32_t data) {
   return false;
 }
 
-static void rv32emu_update_plic_irq_lines(rv32emu_machine_t *m) {
-  uint32_t pending_m = m->plat.plic_pending & m->plat.plic_enable0;
-  uint32_t pending_s = m->plat.plic_pending & m->plat.plic_enable1;
+static uint32_t rv32emu_plic_context_count(const rv32emu_machine_t *m) {
+  if (m == NULL || m->hart_count > RV32EMU_MAX_HARTS) {
+    return 0u;
+  }
+  return m->hart_count * 2u;
+}
 
-  if (pending_m != 0u) {
-    m->cpu.csr[CSR_MIP] |= MIP_MEIP;
-  } else {
-    m->cpu.csr[CSR_MIP] &= ~MIP_MEIP;
+static void rv32emu_sync_timer_irq_for_hart(rv32emu_machine_t *m, uint32_t hartid) {
+  rv32emu_cpu_t *cpu;
+  bool expired;
+
+  if (m == NULL || hartid >= m->hart_count) {
+    return;
   }
 
-  if (pending_s != 0u) {
-    m->cpu.csr[CSR_MIP] |= MIP_SEIP;
+  cpu = rv32emu_hart_cpu(m, hartid);
+  if (cpu == NULL) {
+    return;
+  }
+
+  expired = m->plat.mtime >= m->plat.clint_mtimecmp[hartid];
+  if (m->opts.enable_sbi_shim) {
+    if (expired) {
+      cpu->csr[CSR_MIP] |= MIP_STIP;
+    } else {
+      cpu->csr[CSR_MIP] &= ~MIP_STIP;
+    }
+    cpu->csr[CSR_MIP] &= ~MIP_MTIP;
+    return;
+  }
+
+  if (expired) {
+    cpu->csr[CSR_MIP] |= MIP_MTIP;
   } else {
-    m->cpu.csr[CSR_MIP] &= ~MIP_SEIP;
+    cpu->csr[CSR_MIP] &= ~MIP_MTIP;
+  }
+}
+
+static void rv32emu_update_plic_irq_lines(rv32emu_machine_t *m) {
+  uint32_t hart;
+
+  if (m == NULL) {
+    return;
+  }
+
+  for (hart = 0u; hart < m->hart_count; hart++) {
+    rv32emu_cpu_t *cpu = rv32emu_hart_cpu(m, hart);
+    uint32_t m_context = hart * 2u;
+    uint32_t s_context = m_context + 1u;
+    uint32_t pending_m;
+    uint32_t pending_s;
+
+    if (cpu == NULL) {
+      continue;
+    }
+
+    pending_m = m->plat.plic_pending & m->plat.plic_enable[m_context];
+    pending_s = m->plat.plic_pending & m->plat.plic_enable[s_context];
+
+    if (pending_m != 0u) {
+      cpu->csr[CSR_MIP] |= MIP_MEIP;
+    } else {
+      cpu->csr[CSR_MIP] &= ~MIP_MEIP;
+    }
+
+    if (pending_s != 0u) {
+      cpu->csr[CSR_MIP] |= MIP_SEIP;
+    } else {
+      cpu->csr[CSR_MIP] &= ~MIP_SEIP;
+    }
   }
 }
 
@@ -152,23 +210,27 @@ static uint32_t rv32emu_plic_find_claimable(uint32_t pending, uint32_t enabled) 
   return 0u;
 }
 
-static uint32_t rv32emu_plic_claim(rv32emu_machine_t *m, bool s_context) {
+static uint32_t rv32emu_plic_claim(rv32emu_machine_t *m, uint32_t context) {
   uint32_t enabled;
   uint32_t claim;
 
-  if (m->plat.plic_claim != 0u) {
-    return m->plat.plic_claim;
+  if (m == NULL || context >= rv32emu_plic_context_count(m)) {
+    return 0u;
   }
 
-  enabled = s_context ? m->plat.plic_enable1 : m->plat.plic_enable0;
+  if (m->plat.plic_claim[context] != 0u) {
+    return m->plat.plic_claim[context];
+  }
+
+  enabled = m->plat.plic_enable[context];
   claim = rv32emu_plic_find_claimable(m->plat.plic_pending, enabled);
   if (claim != 0u) {
-    m->plat.plic_claim = claim;
+    m->plat.plic_claim[context] = claim;
     m->plat.plic_pending &= ~(1u << claim);
     rv32emu_update_plic_irq_lines(m);
   }
 
-  return m->plat.plic_claim;
+  return m->plat.plic_claim[context];
 }
 
 static bool rv32emu_handle_uart_read(rv32emu_machine_t *m, uint32_t paddr, int len,
@@ -279,6 +341,8 @@ static bool rv32emu_handle_uart_write(rv32emu_machine_t *m, uint32_t paddr, int 
 static bool rv32emu_handle_clint_read(rv32emu_machine_t *m, uint32_t paddr, int len,
                                       uint32_t *out) {
   uint32_t off = paddr - RV32EMU_CLINT_BASE;
+  uint32_t rel;
+  uint32_t hart;
 
   if (off >= RV32EMU_CLINT_SIZE) {
     return false;
@@ -288,16 +352,30 @@ static bool rv32emu_handle_clint_read(rv32emu_machine_t *m, uint32_t paddr, int 
     return false;
   }
 
+  if (off < CLINT_MSIP_BASE + m->hart_count * 4u) {
+    if ((off & 0x3u) != 0u) {
+      return false;
+    }
+    hart = (off - CLINT_MSIP_BASE) / 4u;
+    *out = m->plat.clint_msip[hart];
+    return true;
+  }
+
+  if (off >= CLINT_MTIMECMP_BASE && off < CLINT_MTIMECMP_BASE + m->hart_count * 8u) {
+    rel = off - CLINT_MTIMECMP_BASE;
+    if ((rel & 0x3u) != 0u) {
+      return false;
+    }
+    hart = rel / 8u;
+    if ((rel & 0x4u) == 0u) {
+      *out = (uint32_t)(m->plat.clint_mtimecmp[hart] & 0xffffffffu);
+    } else {
+      *out = (uint32_t)(m->plat.clint_mtimecmp[hart] >> 32);
+    }
+    return true;
+  }
+
   switch (off) {
-  case CLINT_MSIP:
-    *out = m->plat.clint_msip;
-    return true;
-  case CLINT_MTIMECMP:
-    *out = (uint32_t)(m->plat.mtimecmp & 0xffffffffu);
-    return true;
-  case CLINT_MTIMECMP + 4:
-    *out = (uint32_t)(m->plat.mtimecmp >> 32);
-    return true;
   case CLINT_MTIME:
     *out = (uint32_t)(m->plat.mtime & 0xffffffffu);
     return true;
@@ -313,6 +391,8 @@ static bool rv32emu_handle_clint_read(rv32emu_machine_t *m, uint32_t paddr, int 
 static bool rv32emu_handle_clint_write(rv32emu_machine_t *m, uint32_t paddr, int len,
                                        uint32_t data) {
   uint32_t off = paddr - RV32EMU_CLINT_BASE;
+  uint32_t rel;
+  uint32_t hart;
 
   if (off >= RV32EMU_CLINT_SIZE) {
     return false;
@@ -322,38 +402,80 @@ static bool rv32emu_handle_clint_write(rv32emu_machine_t *m, uint32_t paddr, int
     return false;
   }
 
-  switch (off) {
-  case CLINT_MSIP:
-    m->plat.clint_msip = data & 1u;
-    if (m->plat.clint_msip != 0) {
-      m->cpu.csr[CSR_MIP] |= MIP_MSIP;
-    } else {
-      m->cpu.csr[CSR_MIP] &= ~MIP_MSIP;
+  if (off < CLINT_MSIP_BASE + m->hart_count * 4u) {
+    rv32emu_cpu_t *cpu;
+
+    if ((off & 0x3u) != 0u) {
+      return false;
+    }
+
+    hart = (off - CLINT_MSIP_BASE) / 4u;
+    m->plat.clint_msip[hart] = data & 1u;
+    cpu = rv32emu_hart_cpu(m, hart);
+    if (cpu != NULL) {
+      /*
+       * OpenSBI generic platform uses software interrupt to poke secondary
+       * HARTs into warmboot. If a hart has not started yet, treat MSIP=1 as
+       * its wakeup event.
+       */
+      if (m->plat.clint_msip[hart] != 0u && !cpu->running) {
+        cpu->running = true;
+      }
+      if (m->plat.clint_msip[hart] != 0u) {
+        cpu->csr[CSR_MIP] |= MIP_MSIP;
+      } else {
+        cpu->csr[CSR_MIP] &= ~MIP_MSIP;
+      }
     }
     return true;
-  case CLINT_MTIMECMP:
-    m->plat.mtimecmp = (m->plat.mtimecmp & 0xffffffff00000000ull) | (uint64_t)data;
+  }
+
+  if (off >= CLINT_MTIMECMP_BASE && off < CLINT_MTIMECMP_BASE + m->hart_count * 8u) {
+    rel = off - CLINT_MTIMECMP_BASE;
+    if ((rel & 0x3u) != 0u) {
+      return false;
+    }
+
+    hart = rel / 8u;
+    if ((rel & 0x4u) == 0u) {
+      m->plat.clint_mtimecmp[hart] =
+          (m->plat.clint_mtimecmp[hart] & 0xffffffff00000000ull) | (uint64_t)data;
+    } else {
+      m->plat.clint_mtimecmp[hart] =
+          (m->plat.clint_mtimecmp[hart] & 0x00000000ffffffffull) | ((uint64_t)data << 32);
+    }
+    rv32emu_sync_timer_irq_for_hart(m, hart);
     return true;
-  case CLINT_MTIMECMP + 4:
-    m->plat.mtimecmp = (m->plat.mtimecmp & 0x00000000ffffffffull) |
-                       ((uint64_t)data << 32);
-    return true;
+  }
+
+  switch (off) {
   case CLINT_MTIME:
     m->plat.mtime = (m->plat.mtime & 0xffffffff00000000ull) | (uint64_t)data;
-    m->cpu.csr[CSR_TIME] = (uint32_t)m->plat.mtime;
-    return true;
+    break;
   case CLINT_MTIME + 4:
     m->plat.mtime = (m->plat.mtime & 0x00000000ffffffffull) | ((uint64_t)data << 32);
-    m->cpu.csr[CSR_TIME] = (uint32_t)m->plat.mtime;
-    return true;
+    break;
   default:
     return true;
   }
+
+  for (hart = 0u; hart < m->hart_count; hart++) {
+    rv32emu_cpu_t *cpu = rv32emu_hart_cpu(m, hart);
+    if (cpu != NULL) {
+      cpu->csr[CSR_TIME] = (uint32_t)m->plat.mtime;
+    }
+    rv32emu_sync_timer_irq_for_hart(m, hart);
+  }
+  return true;
 }
 
 static bool rv32emu_handle_plic_read(rv32emu_machine_t *m, uint32_t paddr, int len,
                                      uint32_t *out) {
   uint32_t off = paddr - RV32EMU_PLIC_BASE;
+  uint32_t context_count;
+  uint32_t rel;
+  uint32_t context;
+  uint32_t context_off;
 
   if (off >= RV32EMU_PLIC_SIZE) {
     return false;
@@ -362,32 +484,53 @@ static bool rv32emu_handle_plic_read(rv32emu_machine_t *m, uint32_t paddr, int l
   if (len != 4) {
     return false;
   }
+
+  context_count = rv32emu_plic_context_count(m);
 
   switch (off) {
   case PLIC_PENDING:
     *out = m->plat.plic_pending;
     return true;
-  case PLIC_ENABLE0:
-    *out = m->plat.plic_enable0;
-    return true;
-  case PLIC_ENABLE1:
-    *out = m->plat.plic_enable1;
-    return true;
-  case PLIC_CTX0_CLAIM:
-    *out = rv32emu_plic_claim(m, false);
-    return true;
-  case PLIC_CTX1_CLAIM:
-    *out = rv32emu_plic_claim(m, true);
-    return true;
-  default:
-    *out = 0;
+  }
+
+  if (off >= PLIC_ENABLE_BASE && off < PLIC_ENABLE_BASE + context_count * PLIC_ENABLE_STRIDE) {
+    rel = off - PLIC_ENABLE_BASE;
+    context = rel / PLIC_ENABLE_STRIDE;
+    context_off = rel % PLIC_ENABLE_STRIDE;
+    if (context_off == 0u) {
+      *out = m->plat.plic_enable[context];
+    } else {
+      *out = 0u;
+    }
     return true;
   }
+
+  if (off >= PLIC_CONTEXT_BASE &&
+      off < PLIC_CONTEXT_BASE + context_count * PLIC_CONTEXT_STRIDE) {
+    rel = off - PLIC_CONTEXT_BASE;
+    context = rel / PLIC_CONTEXT_STRIDE;
+    context_off = rel % PLIC_CONTEXT_STRIDE;
+    if (context_off == PLIC_CONTEXT_THRESHOLD) {
+      *out = 0u;
+      return true;
+    }
+    if (context_off == PLIC_CONTEXT_CLAIM) {
+      *out = rv32emu_plic_claim(m, context);
+      return true;
+    }
+  }
+
+  *out = 0u;
+  return true;
 }
 
 static bool rv32emu_handle_plic_write(rv32emu_machine_t *m, uint32_t paddr, int len,
                                       uint32_t data) {
   uint32_t off = paddr - RV32EMU_PLIC_BASE;
+  uint32_t context_count;
+  uint32_t rel;
+  uint32_t context;
+  uint32_t context_off;
 
   if (off >= RV32EMU_PLIC_SIZE) {
     return false;
@@ -396,31 +539,65 @@ static bool rv32emu_handle_plic_write(rv32emu_machine_t *m, uint32_t paddr, int 
   if (len != 4) {
     return false;
   }
+
+  context_count = rv32emu_plic_context_count(m);
 
   switch (off) {
   case PLIC_PENDING:
     m->plat.plic_pending = data;
     rv32emu_uart_sync_irq(m);
     return true;
-  case PLIC_ENABLE0:
-    m->plat.plic_enable0 = data;
-    rv32emu_update_plic_irq_lines(m);
-    return true;
-  case PLIC_ENABLE1:
-    m->plat.plic_enable1 = data;
-    rv32emu_update_plic_irq_lines(m);
-    return true;
-  case PLIC_CTX0_CLAIM:
-  case PLIC_CTX1_CLAIM:
-    if (data == m->plat.plic_claim) {
-      m->plat.plic_claim = 0;
-      rv32emu_uart_sync_irq(m);
-    } else {
+  default:
+    break;
+  }
+
+  if (off >= PLIC_ENABLE_BASE && off < PLIC_ENABLE_BASE + context_count * PLIC_ENABLE_STRIDE) {
+    rel = off - PLIC_ENABLE_BASE;
+    context = rel / PLIC_ENABLE_STRIDE;
+    context_off = rel % PLIC_ENABLE_STRIDE;
+    if (context_off == 0u) {
+      m->plat.plic_enable[context] = data;
       rv32emu_update_plic_irq_lines(m);
     }
     return true;
-  default:
-    return true;
+  }
+
+  if (off >= PLIC_CONTEXT_BASE &&
+      off < PLIC_CONTEXT_BASE + context_count * PLIC_CONTEXT_STRIDE) {
+    rel = off - PLIC_CONTEXT_BASE;
+    context = rel / PLIC_CONTEXT_STRIDE;
+    context_off = rel % PLIC_CONTEXT_STRIDE;
+    if (context_off == PLIC_CONTEXT_CLAIM) {
+      if (data == m->plat.plic_claim[context]) {
+        m->plat.plic_claim[context] = 0u;
+        rv32emu_uart_sync_irq(m);
+      } else {
+        rv32emu_update_plic_irq_lines(m);
+      }
+      return true;
+    }
+    if (context_off == PLIC_CONTEXT_THRESHOLD) {
+      return true;
+    }
+  }
+
+  return true;
+}
+
+void rv32emu_step_timer(rv32emu_machine_t *m) {
+  uint32_t hart;
+
+  if (m == NULL) {
+    return;
+  }
+
+  m->plat.mtime += 1;
+  for (hart = 0u; hart < m->hart_count; hart++) {
+    rv32emu_cpu_t *cpu = rv32emu_hart_cpu(m, hart);
+    if (cpu != NULL) {
+      cpu->csr[CSR_TIME] = (uint32_t)m->plat.mtime;
+    }
+    rv32emu_sync_timer_irq_for_hart(m, hart);
   }
 }
 
@@ -547,27 +724,4 @@ bool rv32emu_phys_write(rv32emu_machine_t *m, uint32_t paddr, int len, uint32_t 
   }
 
   return false;
-}
-
-void rv32emu_step_timer(rv32emu_machine_t *m) {
-  if (m == NULL) {
-    return;
-  }
-
-  m->plat.mtime += 1;
-  m->cpu.csr[CSR_TIME] = (uint32_t)m->plat.mtime;
-
-  if (m->plat.mtime >= m->plat.mtimecmp) {
-    if (m->opts.enable_sbi_shim) {
-      m->cpu.csr[CSR_MIP] |= MIP_STIP;
-      m->cpu.csr[CSR_MIP] &= ~MIP_MTIP;
-    } else {
-      m->cpu.csr[CSR_MIP] |= MIP_MTIP;
-    }
-  } else {
-    m->cpu.csr[CSR_MIP] &= ~MIP_MTIP;
-    if (m->opts.enable_sbi_shim) {
-      m->cpu.csr[CSR_MIP] &= ~MIP_STIP;
-    }
-  }
 }

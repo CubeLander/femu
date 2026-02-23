@@ -20,6 +20,9 @@
 #define RV32EMU_DEFAULT_INITRD_LOAD 0x88000000u
 #define RV32EMU_DEFAULT_MAX_INSTR (50000000ull)
 #define RV32EMU_UART_RX_FIFO_SIZE 256u
+#define RV32EMU_DEFAULT_HART_COUNT 1u
+#define RV32EMU_MAX_HARTS 4u
+#define RV32EMU_MAX_PLIC_CONTEXTS (RV32EMU_MAX_HARTS * 2u)
 
 typedef enum {
   RV32EMU_PRIV_U = 0,
@@ -150,6 +153,7 @@ typedef struct {
   bool boot_s_mode;
   bool enable_sbi_shim;
   bool trace;
+  uint32_t hart_count;
   uint64_t max_instructions;
 } rv32emu_options_t;
 
@@ -159,13 +163,12 @@ typedef struct {
   uint32_t dram_size;
 
   uint64_t mtime;
-  uint64_t mtimecmp;
-  uint32_t clint_msip;
+  uint64_t clint_mtimecmp[RV32EMU_MAX_HARTS];
+  uint32_t clint_msip[RV32EMU_MAX_HARTS];
 
-  uint32_t plic_claim;
   uint32_t plic_pending;
-  uint32_t plic_enable0;
-  uint32_t plic_enable1;
+  uint32_t plic_enable[RV32EMU_MAX_PLIC_CONTEXTS];
+  uint32_t plic_claim[RV32EMU_MAX_PLIC_CONTEXTS];
 
   uint8_t uart_regs[8];
   uint8_t uart_rx_fifo[RV32EMU_UART_RX_FIFO_SIZE];
@@ -195,8 +198,64 @@ typedef struct {
 typedef struct {
   rv32emu_options_t opts;
   rv32emu_platform_t plat;
-  rv32emu_cpu_t cpu;
+  union {
+    rv32emu_cpu_t cpu;
+    rv32emu_cpu_t harts[RV32EMU_MAX_HARTS];
+  };
+  uint32_t hart_count;
+  uint32_t active_hart;
 } rv32emu_machine_t;
+
+static inline uint32_t rv32emu_hart_slot(const rv32emu_machine_t *m, uint32_t hartid) {
+  if (m == NULL || hartid >= m->hart_count || hartid >= RV32EMU_MAX_HARTS) {
+    return RV32EMU_MAX_HARTS;
+  }
+
+  if (m->active_hart == 0u || m->active_hart >= m->hart_count) {
+    return hartid;
+  }
+
+  if (hartid == 0u) {
+    return m->active_hart;
+  }
+  if (hartid == m->active_hart) {
+    return 0u;
+  }
+  return hartid;
+}
+
+static inline rv32emu_cpu_t *rv32emu_hart_cpu(rv32emu_machine_t *m, uint32_t hartid) {
+  uint32_t slot = rv32emu_hart_slot(m, hartid);
+  if (slot >= RV32EMU_MAX_HARTS) {
+    return NULL;
+  }
+  return &m->harts[slot];
+}
+
+static inline const rv32emu_cpu_t *rv32emu_hart_cpu_const(const rv32emu_machine_t *m,
+                                                           uint32_t hartid) {
+  uint32_t slot = rv32emu_hart_slot(m, hartid);
+  if (slot >= RV32EMU_MAX_HARTS) {
+    return NULL;
+  }
+  return &m->harts[slot];
+}
+
+static inline bool rv32emu_any_hart_running(const rv32emu_machine_t *m) {
+  uint32_t i;
+
+  if (m == NULL) {
+    return false;
+  }
+
+  for (i = 0; i < m->hart_count; i++) {
+    const rv32emu_cpu_t *cpu = rv32emu_hart_cpu_const(m, i);
+    if (cpu != NULL && cpu->running) {
+      return true;
+    }
+  }
+  return false;
+}
 
 void rv32emu_default_options(rv32emu_options_t *opts);
 

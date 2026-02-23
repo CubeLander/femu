@@ -1045,12 +1045,68 @@ static bool rv32emu_exec_misc_group(rv32emu_machine_t *m, const rv32emu_decoded_
   }
 }
 
+bool rv32emu_exec_decoded(rv32emu_machine_t *m, const rv32emu_decoded_insn_t *decoded) {
+  uint32_t next_pc;
+  uint32_t rs1v;
+  uint32_t rs2v;
+
+  if (m == NULL || decoded == NULL) {
+    return false;
+  }
+
+  next_pc = RV32EMU_CPU(m)->pc + 4u;
+  rs1v = RV32EMU_CPU(m)->x[decoded->rs1];
+  rs2v = RV32EMU_CPU(m)->x[decoded->rs2];
+
+  switch (decoded->opcode) {
+  case 0x37:
+  case 0x17:
+  case 0x6f:
+  case 0x67:
+  case 0x63:
+    if (!rv32emu_exec_cf_group(m, decoded, rs1v, rs2v, &next_pc)) {
+      return false;
+    }
+    break;
+  case 0x03:
+  case 0x07:
+  case 0x23:
+  case 0x27:
+    if (!rv32emu_exec_mem_group(m, decoded, rs1v, rs2v)) {
+      return false;
+    }
+    break;
+  case 0x13:
+  case 0x33:
+    if (!rv32emu_exec_int_group(m, decoded, rs1v, rs2v)) {
+      return false;
+    }
+    break;
+  case 0x0f:
+  case 0x2f:
+  case 0x53:
+  case 0x73:
+    if (!rv32emu_exec_misc_group(m, decoded, rs1v, &next_pc)) {
+      return false;
+    }
+    break;
+  default:
+    rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, decoded->raw);
+    return false;
+  }
+
+  RV32EMU_CPU(m)->pc = next_pc;
+  RV32EMU_CPU(m)->x[0] = 0;
+  RV32EMU_CPU(m)->cycle += 1;
+  RV32EMU_CPU(m)->instret += 1;
+  rv32emu_step_timer(m);
+  return true;
+}
+
 bool rv32emu_exec_one(rv32emu_machine_t *m) {
   uint32_t insn = 0;
   rv32emu_decoded_insn_t decoded;
   uint32_t next_pc;
-  uint32_t rs1v;
-  uint32_t rs2v;
   uint32_t insn16 = 0;
 
   if ((RV32EMU_CPU(m)->pc & 1u) != 0u) {
@@ -1081,52 +1137,5 @@ bool rv32emu_exec_one(rv32emu_machine_t *m) {
   }
 
   rv32emu_decode32(insn, &decoded);
-  next_pc = RV32EMU_CPU(m)->pc + 4u;
-
-  rs1v = RV32EMU_CPU(m)->x[decoded.rs1];
-  rs2v = RV32EMU_CPU(m)->x[decoded.rs2];
-
-  switch (decoded.opcode) {
-  case 0x37:
-  case 0x17:
-  case 0x6f:
-  case 0x67:
-  case 0x63:
-    if (!rv32emu_exec_cf_group(m, &decoded, rs1v, rs2v, &next_pc)) {
-      return false;
-    }
-    break;
-  case 0x03:
-  case 0x07:
-  case 0x23:
-  case 0x27:
-    if (!rv32emu_exec_mem_group(m, &decoded, rs1v, rs2v)) {
-      return false;
-    }
-    break;
-  case 0x13:
-  case 0x33:
-    if (!rv32emu_exec_int_group(m, &decoded, rs1v, rs2v)) {
-      return false;
-    }
-    break;
-  case 0x0f:
-  case 0x2f:
-  case 0x53:
-  case 0x73:
-    if (!rv32emu_exec_misc_group(m, &decoded, rs1v, &next_pc)) {
-      return false;
-    }
-    break;
-  default:
-    rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, decoded.raw);
-    return false;
-  }
-
-  RV32EMU_CPU(m)->pc = next_pc;
-  RV32EMU_CPU(m)->x[0] = 0;
-  RV32EMU_CPU(m)->cycle += 1;
-  RV32EMU_CPU(m)->instret += 1;
-  rv32emu_step_timer(m);
-  return true;
+  return rv32emu_exec_decoded(m, &decoded);
 }

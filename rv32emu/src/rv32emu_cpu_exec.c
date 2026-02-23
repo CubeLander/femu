@@ -104,7 +104,7 @@ static bool rv32emu_csr_is_implemented(uint16_t csr_num) {
 
 static void rv32emu_write_rd(rv32emu_machine_t *m, uint32_t rd, uint32_t value) {
   if (rd != 0u) {
-    m->cpu.x[rd] = value;
+    RV32EMU_CPU(m)->x[rd] = value;
   }
 }
 
@@ -164,11 +164,11 @@ static bool rv32emu_exec_mret(rv32emu_machine_t *m, uint32_t *next_pc) {
   uint32_t mstatus;
   uint32_t mpp;
 
-  if (m->cpu.priv != RV32EMU_PRIV_M) {
+  if (RV32EMU_CPU(m)->priv != RV32EMU_PRIV_M) {
     return false;
   }
 
-  mstatus = m->cpu.csr[CSR_MSTATUS];
+  mstatus = RV32EMU_CPU(m)->csr[CSR_MSTATUS];
   mpp = (mstatus & MSTATUS_MPP_MASK) >> MSTATUS_MPP_SHIFT;
 
   if ((mstatus & MSTATUS_MPIE) != 0u) {
@@ -179,20 +179,20 @@ static bool rv32emu_exec_mret(rv32emu_machine_t *m, uint32_t *next_pc) {
   mstatus |= MSTATUS_MPIE;
   mstatus &= ~MSTATUS_MPP_MASK;
 
-  m->cpu.csr[CSR_MSTATUS] = mstatus;
-  m->cpu.priv = (rv32emu_priv_t)(mpp & 0x3u);
-  *next_pc = m->cpu.csr[CSR_MEPC] & ~1u;
+  RV32EMU_CPU(m)->csr[CSR_MSTATUS] = mstatus;
+  RV32EMU_CPU(m)->priv = (rv32emu_priv_t)(mpp & 0x3u);
+  *next_pc = RV32EMU_CPU(m)->csr[CSR_MEPC] & ~1u;
   return true;
 }
 
 static bool rv32emu_exec_sret(rv32emu_machine_t *m, uint32_t *next_pc) {
   uint32_t mstatus;
 
-  if (m->cpu.priv == RV32EMU_PRIV_U) {
+  if (RV32EMU_CPU(m)->priv == RV32EMU_PRIV_U) {
     return false;
   }
 
-  mstatus = m->cpu.csr[CSR_MSTATUS];
+  mstatus = RV32EMU_CPU(m)->csr[CSR_MSTATUS];
   if ((mstatus & MSTATUS_SPIE) != 0u) {
     mstatus |= MSTATUS_SIE;
   } else {
@@ -201,14 +201,14 @@ static bool rv32emu_exec_sret(rv32emu_machine_t *m, uint32_t *next_pc) {
   mstatus |= MSTATUS_SPIE;
 
   if ((mstatus & MSTATUS_SPP) != 0u) {
-    m->cpu.priv = RV32EMU_PRIV_S;
+    RV32EMU_CPU(m)->priv = RV32EMU_PRIV_S;
   } else {
-    m->cpu.priv = RV32EMU_PRIV_U;
+    RV32EMU_CPU(m)->priv = RV32EMU_PRIV_U;
   }
   mstatus &= ~MSTATUS_SPP;
 
-  m->cpu.csr[CSR_MSTATUS] = mstatus;
-  *next_pc = m->cpu.csr[CSR_SEPC] & ~1u;
+  RV32EMU_CPU(m)->csr[CSR_MSTATUS] = mstatus;
+  *next_pc = RV32EMU_CPU(m)->csr[CSR_SEPC] & ~1u;
   return true;
 }
 
@@ -312,7 +312,7 @@ static bool rv32emu_store_value(rv32emu_machine_t *m, uint32_t addr, uint32_t fu
   }
 
   if (ok) {
-    m->cpu.lr_valid = false;
+    RV32EMU_CPU(m)->lr_valid = false;
   }
   return ok;
 }
@@ -355,13 +355,13 @@ static bool rv32emu_exec_fp_load(rv32emu_machine_t *m, uint32_t rd, uint32_t fun
       return false;
     }
     /* NaN-box single precision into an FLEN=64 register. */
-    m->cpu.f[rd] = 0xffffffff00000000ull | (uint64_t)raw32;
+    RV32EMU_CPU(m)->f[rd] = 0xffffffff00000000ull | (uint64_t)raw32;
     return true;
   case 0x3: /* fld */
     if (!rv32emu_load_u64(m, addr, &raw64)) {
       return false;
     }
-    m->cpu.f[rd] = raw64;
+    RV32EMU_CPU(m)->f[rd] = raw64;
     return true;
   default:
     rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, 0);
@@ -380,9 +380,9 @@ static bool rv32emu_exec_fp_store(rv32emu_machine_t *m, uint32_t rs2, uint32_t f
 
   switch (funct3) {
   case 0x2: /* fsw */
-    return rv32emu_virt_write(m, addr, 4, RV32EMU_ACC_STORE, (uint32_t)m->cpu.f[rs2]);
+    return rv32emu_virt_write(m, addr, 4, RV32EMU_ACC_STORE, (uint32_t)RV32EMU_CPU(m)->f[rs2]);
   case 0x3: /* fsd */
-    return rv32emu_store_u64(m, addr, m->cpu.f[rs2]);
+    return rv32emu_store_u64(m, addr, RV32EMU_CPU(m)->f[rs2]);
   default:
     rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, 0);
     return false;
@@ -401,8 +401,8 @@ static bool rv32emu_exec_fp_op(rv32emu_machine_t *m, uint32_t rd, uint32_t rs1,
     return false;
   }
 
-  a = m->cpu.f[rs1];
-  b = m->cpu.f[rs2];
+  a = RV32EMU_CPU(m)->f[rs1];
+  b = RV32EMU_CPU(m)->f[rs2];
 
   switch (funct7) {
   case 0x10: /* fsgnj.s/fsgnjn.s/fsgnjx.s */
@@ -421,7 +421,7 @@ static bool rv32emu_exec_fp_op(rv32emu_machine_t *m, uint32_t rd, uint32_t rs1,
     default:
       return false;
     }
-    m->cpu.f[rd] = 0xffffffff00000000ull | (result & 0xffffffffu);
+    RV32EMU_CPU(m)->f[rd] = 0xffffffff00000000ull | (result & 0xffffffffu);
     return true;
   case 0x11: /* fsgnj.d/fsgnjn.d/fsgnjx.d */
     sign_mask = 1ull << 63;
@@ -439,7 +439,7 @@ static bool rv32emu_exec_fp_op(rv32emu_machine_t *m, uint32_t rd, uint32_t rs1,
     default:
       return false;
     }
-    m->cpu.f[rd] = result;
+    RV32EMU_CPU(m)->f[rd] = result;
     return true;
   case 0x70: /* fmv.x.w (rm=000, rs2=0) */
     if (funct3 != 0x0u || rs2 != 0u) {
@@ -451,7 +451,7 @@ static bool rv32emu_exec_fp_op(rv32emu_machine_t *m, uint32_t rd, uint32_t rs1,
     if (funct3 != 0x0u || rs2 != 0u) {
       return false;
     }
-    m->cpu.f[rd] = 0xffffffff00000000ull | (uint64_t)m->cpu.x[rs1];
+    RV32EMU_CPU(m)->f[rd] = 0xffffffff00000000ull | (uint64_t)RV32EMU_CPU(m)->x[rs1];
     return true;
   default:
     return false;
@@ -515,10 +515,10 @@ static bool rv32emu_exec_amo(rv32emu_machine_t *m, uint32_t insn) {
   uint32_t rs2 = rv32emu_bits(insn, 24, 20);
   uint32_t funct3 = rv32emu_bits(insn, 14, 12);
   uint32_t funct5 = rv32emu_bits(insn, 31, 27);
-  uint32_t addr = m->cpu.x[rs1];
+  uint32_t addr = RV32EMU_CPU(m)->x[rs1];
   uint32_t old_val = 0;
   uint32_t new_val = 0;
-  uint32_t rs2v = m->cpu.x[rs2];
+  uint32_t rs2v = RV32EMU_CPU(m)->x[rs2];
 
   if (funct3 != 0x2u) {
     rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, insn);
@@ -546,8 +546,8 @@ static bool rv32emu_exec_amo(rv32emu_machine_t *m, uint32_t insn) {
     if (!rv32emu_virt_read(m, addr, 4, RV32EMU_ACC_LOAD, &old_val)) {
       return false;
     }
-    m->cpu.lr_addr = addr;
-    m->cpu.lr_valid = true;
+    RV32EMU_CPU(m)->lr_addr = addr;
+    RV32EMU_CPU(m)->lr_valid = true;
     rv32emu_write_rd(m, rd, old_val);
     return true;
   }
@@ -566,13 +566,13 @@ static bool rv32emu_exec_amo(rv32emu_machine_t *m, uint32_t insn) {
      *
      * In both cases, sc.w consumes/clears the local reservation.
      */
-    if (m->cpu.lr_valid && m->cpu.lr_addr == addr) {
+    if (RV32EMU_CPU(m)->lr_valid && RV32EMU_CPU(m)->lr_addr == addr) {
       if (!rv32emu_virt_write(m, addr, 4, RV32EMU_ACC_STORE, rs2v)) {
         return false;
       }
       status = 0u;
     }
-    m->cpu.lr_valid = false;
+    RV32EMU_CPU(m)->lr_valid = false;
     rv32emu_write_rd(m, rd, status);
     return true;
   }
@@ -621,7 +621,7 @@ static bool rv32emu_exec_amo(rv32emu_machine_t *m, uint32_t insn) {
    * AMO writes are regular stores from LR/SC perspective, so clear local
    * reservation as well. Cross-hart invalidation is handled by virt_write().
    */
-  m->cpu.lr_valid = false;
+  RV32EMU_CPU(m)->lr_valid = false;
   rv32emu_write_rd(m, rd, old_val);
   return true;
 }
@@ -648,19 +648,19 @@ static bool rv32emu_exec_compressed(rv32emu_machine_t *m, uint16_t insn, uint32_
         rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, insn);
         return false;
       }
-      rv32emu_write_rd(m, rd, m->cpu.x[2] + imm);
+      rv32emu_write_rd(m, rd, RV32EMU_CPU(m)->x[2] + imm);
       return true;
     case 0x1: /* c.fld */
       rs1 = 8u + rv32emu_c_bits(insn, 9, 7);
       rd = 8u + rv32emu_c_bits(insn, 4, 2);
       imm = (rv32emu_c_bits(insn, 12, 10) << 3) | (rv32emu_c_bits(insn, 6, 5) << 6);
-      return rv32emu_exec_fp_load(m, rd, 0x3, m->cpu.x[rs1], (int32_t)imm);
+      return rv32emu_exec_fp_load(m, rd, 0x3, RV32EMU_CPU(m)->x[rs1], (int32_t)imm);
     case 0x2: /* c.lw */
       rs1 = 8u + rv32emu_c_bits(insn, 9, 7);
       rd = 8u + rv32emu_c_bits(insn, 4, 2);
       imm = (rv32emu_c_bits(insn, 6, 6) << 2) | (rv32emu_c_bits(insn, 12, 10) << 3) |
             (rv32emu_c_bits(insn, 5, 5) << 6);
-      addr = m->cpu.x[rs1] + imm;
+      addr = RV32EMU_CPU(m)->x[rs1] + imm;
       if (!rv32emu_load_value(m, addr, 0x2, &value)) {
         return false;
       }
@@ -671,25 +671,25 @@ static bool rv32emu_exec_compressed(rv32emu_machine_t *m, uint16_t insn, uint32_
       rd = 8u + rv32emu_c_bits(insn, 4, 2);
       imm = (rv32emu_c_bits(insn, 6, 6) << 2) | (rv32emu_c_bits(insn, 12, 10) << 3) |
             (rv32emu_c_bits(insn, 5, 5) << 6);
-      return rv32emu_exec_fp_load(m, rd, 0x2, m->cpu.x[rs1], (int32_t)imm);
+      return rv32emu_exec_fp_load(m, rd, 0x2, RV32EMU_CPU(m)->x[rs1], (int32_t)imm);
     case 0x5: /* c.fsd */
       rs1 = 8u + rv32emu_c_bits(insn, 9, 7);
       rs2 = 8u + rv32emu_c_bits(insn, 4, 2);
       imm = (rv32emu_c_bits(insn, 12, 10) << 3) | (rv32emu_c_bits(insn, 6, 5) << 6);
-      return rv32emu_exec_fp_store(m, rs2, 0x3, m->cpu.x[rs1], (int32_t)imm);
+      return rv32emu_exec_fp_store(m, rs2, 0x3, RV32EMU_CPU(m)->x[rs1], (int32_t)imm);
     case 0x6: /* c.sw */
       rs1 = 8u + rv32emu_c_bits(insn, 9, 7);
       rs2 = 8u + rv32emu_c_bits(insn, 4, 2);
       imm = (rv32emu_c_bits(insn, 6, 6) << 2) | (rv32emu_c_bits(insn, 12, 10) << 3) |
             (rv32emu_c_bits(insn, 5, 5) << 6);
-      addr = m->cpu.x[rs1] + imm;
-      return rv32emu_store_value(m, addr, 0x2, m->cpu.x[rs2]);
+      addr = RV32EMU_CPU(m)->x[rs1] + imm;
+      return rv32emu_store_value(m, addr, 0x2, RV32EMU_CPU(m)->x[rs2]);
     case 0x7: /* c.fsw */
       rs1 = 8u + rv32emu_c_bits(insn, 9, 7);
       rs2 = 8u + rv32emu_c_bits(insn, 4, 2);
       imm = (rv32emu_c_bits(insn, 6, 6) << 2) | (rv32emu_c_bits(insn, 12, 10) << 3) |
             (rv32emu_c_bits(insn, 5, 5) << 6);
-      return rv32emu_exec_fp_store(m, rs2, 0x2, m->cpu.x[rs1], (int32_t)imm);
+      return rv32emu_exec_fp_store(m, rs2, 0x2, RV32EMU_CPU(m)->x[rs1], (int32_t)imm);
     default:
       rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, insn);
       return false;
@@ -699,11 +699,11 @@ static bool rv32emu_exec_compressed(rv32emu_machine_t *m, uint16_t insn, uint32_
     case 0x0: /* c.addi/c.nop */
       rd = rv32emu_c_bits(insn, 11, 7);
       imm = (uint32_t)rv32emu_c_imm_addi(insn);
-      rv32emu_write_rd(m, rd, m->cpu.x[rd] + imm);
+      rv32emu_write_rd(m, rd, RV32EMU_CPU(m)->x[rd] + imm);
       return true;
     case 0x1: /* c.jal */
-      rv32emu_write_rd(m, 1, m->cpu.pc + 2u);
-      *next_pc = m->cpu.pc + (uint32_t)rv32emu_c_imm_j(insn);
+      rv32emu_write_rd(m, 1, RV32EMU_CPU(m)->pc + 2u);
+      *next_pc = RV32EMU_CPU(m)->pc + (uint32_t)rv32emu_c_imm_j(insn);
       return true;
     case 0x2: /* c.li */
       rd = rv32emu_c_bits(insn, 11, 7);
@@ -719,7 +719,7 @@ static bool rv32emu_exec_compressed(rv32emu_machine_t *m, uint16_t insn, uint32_
           rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, insn);
           return false;
         }
-        rv32emu_write_rd(m, 2, m->cpu.x[2] + (uint32_t)rv32emu_sign_extend(imm, 10));
+        rv32emu_write_rd(m, 2, RV32EMU_CPU(m)->x[2] + (uint32_t)rv32emu_sign_extend(imm, 10));
         return true;
       }
       if (rd == 0u) {
@@ -742,7 +742,7 @@ static bool rv32emu_exec_compressed(rv32emu_machine_t *m, uint16_t insn, uint32_
           return false;
         }
         shamt = rv32emu_c_bits(insn, 6, 2);
-        rv32emu_write_rd(m, rd, m->cpu.x[rd] >> shamt);
+        rv32emu_write_rd(m, rd, RV32EMU_CPU(m)->x[rd] >> shamt);
         return true;
       case 0x1: /* c.srai */
         if (rv32emu_c_bits(insn, 12, 12) != 0u) {
@@ -750,10 +750,10 @@ static bool rv32emu_exec_compressed(rv32emu_machine_t *m, uint16_t insn, uint32_
           return false;
         }
         shamt = rv32emu_c_bits(insn, 6, 2);
-        rv32emu_write_rd(m, rd, (uint32_t)((int32_t)m->cpu.x[rd] >> shamt));
+        rv32emu_write_rd(m, rd, (uint32_t)((int32_t)RV32EMU_CPU(m)->x[rd] >> shamt));
         return true;
       case 0x2: /* c.andi */
-        rv32emu_write_rd(m, rd, m->cpu.x[rd] & (uint32_t)rv32emu_c_imm_addi(insn));
+        rv32emu_write_rd(m, rd, RV32EMU_CPU(m)->x[rd] & (uint32_t)rv32emu_c_imm_addi(insn));
         return true;
       case 0x3:
         if (rv32emu_c_bits(insn, 12, 12) != 0u) {
@@ -763,16 +763,16 @@ static bool rv32emu_exec_compressed(rv32emu_machine_t *m, uint16_t insn, uint32_
         rs2 = 8u + rv32emu_c_bits(insn, 4, 2);
         switch (rv32emu_c_bits(insn, 6, 5)) {
         case 0x0: /* c.sub */
-          rv32emu_write_rd(m, rd, m->cpu.x[rd] - m->cpu.x[rs2]);
+          rv32emu_write_rd(m, rd, RV32EMU_CPU(m)->x[rd] - RV32EMU_CPU(m)->x[rs2]);
           return true;
         case 0x1: /* c.xor */
-          rv32emu_write_rd(m, rd, m->cpu.x[rd] ^ m->cpu.x[rs2]);
+          rv32emu_write_rd(m, rd, RV32EMU_CPU(m)->x[rd] ^ RV32EMU_CPU(m)->x[rs2]);
           return true;
         case 0x2: /* c.or */
-          rv32emu_write_rd(m, rd, m->cpu.x[rd] | m->cpu.x[rs2]);
+          rv32emu_write_rd(m, rd, RV32EMU_CPU(m)->x[rd] | RV32EMU_CPU(m)->x[rs2]);
           return true;
         case 0x3: /* c.and */
-          rv32emu_write_rd(m, rd, m->cpu.x[rd] & m->cpu.x[rs2]);
+          rv32emu_write_rd(m, rd, RV32EMU_CPU(m)->x[rd] & RV32EMU_CPU(m)->x[rs2]);
           return true;
         default:
           break;
@@ -784,18 +784,18 @@ static bool rv32emu_exec_compressed(rv32emu_machine_t *m, uint16_t insn, uint32_
       rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, insn);
       return false;
     case 0x5: /* c.j */
-      *next_pc = m->cpu.pc + (uint32_t)rv32emu_c_imm_j(insn);
+      *next_pc = RV32EMU_CPU(m)->pc + (uint32_t)rv32emu_c_imm_j(insn);
       return true;
     case 0x6: /* c.beqz */
       rs1 = 8u + rv32emu_c_bits(insn, 9, 7);
-      if (m->cpu.x[rs1] == 0u) {
-        *next_pc = m->cpu.pc + (uint32_t)rv32emu_c_imm_b(insn);
+      if (RV32EMU_CPU(m)->x[rs1] == 0u) {
+        *next_pc = RV32EMU_CPU(m)->pc + (uint32_t)rv32emu_c_imm_b(insn);
       }
       return true;
     case 0x7: /* c.bnez */
       rs1 = 8u + rv32emu_c_bits(insn, 9, 7);
-      if (m->cpu.x[rs1] != 0u) {
-        *next_pc = m->cpu.pc + (uint32_t)rv32emu_c_imm_b(insn);
+      if (RV32EMU_CPU(m)->x[rs1] != 0u) {
+        *next_pc = RV32EMU_CPU(m)->pc + (uint32_t)rv32emu_c_imm_b(insn);
       }
       return true;
     default:
@@ -811,7 +811,7 @@ static bool rv32emu_exec_compressed(rv32emu_machine_t *m, uint16_t insn, uint32_
         return false;
       }
       shamt = rv32emu_c_bits(insn, 6, 2);
-      rv32emu_write_rd(m, rd, m->cpu.x[rd] << shamt);
+      rv32emu_write_rd(m, rd, RV32EMU_CPU(m)->x[rd] << shamt);
       return true;
     case 0x1: /* c.fldsp */
       rd = rv32emu_c_bits(insn, 11, 7);
@@ -821,7 +821,7 @@ static bool rv32emu_exec_compressed(rv32emu_machine_t *m, uint16_t insn, uint32_
       }
       imm = (rv32emu_c_bits(insn, 4, 2) << 6) | (rv32emu_c_bits(insn, 12, 12) << 5) |
             (rv32emu_c_bits(insn, 6, 5) << 3);
-      return rv32emu_exec_fp_load(m, rd, 0x3, m->cpu.x[2], (int32_t)imm);
+      return rv32emu_exec_fp_load(m, rd, 0x3, RV32EMU_CPU(m)->x[2], (int32_t)imm);
     case 0x2: /* c.lwsp */
       rd = rv32emu_c_bits(insn, 11, 7);
       if (rd == 0u) {
@@ -830,7 +830,7 @@ static bool rv32emu_exec_compressed(rv32emu_machine_t *m, uint16_t insn, uint32_
       }
       imm = (rv32emu_c_bits(insn, 6, 4) << 2) | (rv32emu_c_bits(insn, 12, 12) << 5) |
             (rv32emu_c_bits(insn, 3, 2) << 6);
-      addr = m->cpu.x[2] + imm;
+      addr = RV32EMU_CPU(m)->x[2] + imm;
       if (!rv32emu_load_value(m, addr, 0x2, &value)) {
         return false;
       }
@@ -844,7 +844,7 @@ static bool rv32emu_exec_compressed(rv32emu_machine_t *m, uint16_t insn, uint32_
       }
       imm = (rv32emu_c_bits(insn, 6, 4) << 2) | (rv32emu_c_bits(insn, 12, 12) << 5) |
             (rv32emu_c_bits(insn, 3, 2) << 6);
-      return rv32emu_exec_fp_load(m, rd, 0x2, m->cpu.x[2], (int32_t)imm);
+      return rv32emu_exec_fp_load(m, rd, 0x2, RV32EMU_CPU(m)->x[2], (int32_t)imm);
     case 0x4:
       rd = rv32emu_c_bits(insn, 11, 7);
       rs2 = rv32emu_c_bits(insn, 6, 2);
@@ -854,18 +854,18 @@ static bool rv32emu_exec_compressed(rv32emu_machine_t *m, uint16_t insn, uint32_
             rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, insn);
             return false;
           }
-          *next_pc = m->cpu.x[rd] & ~1u;
+          *next_pc = RV32EMU_CPU(m)->x[rd] & ~1u;
           return true;
         }
         if (rd == 0u) {
           rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, insn);
           return false;
         }
-        rv32emu_write_rd(m, rd, m->cpu.x[rs2]); /* c.mv */
+        rv32emu_write_rd(m, rd, RV32EMU_CPU(m)->x[rs2]); /* c.mv */
         return true;
       }
       if (rd == 0u && rs2 == 0u) { /* c.ebreak */
-        rv32emu_raise_exception(m, RV32EMU_EXC_BREAKPOINT, m->cpu.pc);
+        rv32emu_raise_exception(m, RV32EMU_EXC_BREAKPOINT, RV32EMU_CPU(m)->pc);
         return false;
       }
       if (rs2 == 0u) { /* c.jalr */
@@ -873,29 +873,29 @@ static bool rv32emu_exec_compressed(rv32emu_machine_t *m, uint16_t insn, uint32_
           rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, insn);
           return false;
         }
-        rv32emu_write_rd(m, 1, m->cpu.pc + 2u);
-        *next_pc = m->cpu.x[rd] & ~1u;
+        rv32emu_write_rd(m, 1, RV32EMU_CPU(m)->pc + 2u);
+        *next_pc = RV32EMU_CPU(m)->x[rd] & ~1u;
         return true;
       }
       if (rd == 0u) {
         rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, insn);
         return false;
       }
-      rv32emu_write_rd(m, rd, m->cpu.x[rd] + m->cpu.x[rs2]); /* c.add */
+      rv32emu_write_rd(m, rd, RV32EMU_CPU(m)->x[rd] + RV32EMU_CPU(m)->x[rs2]); /* c.add */
       return true;
     case 0x5: /* c.fsdsp */
       rs2 = rv32emu_c_bits(insn, 6, 2);
       imm = (rv32emu_c_bits(insn, 12, 10) << 3) | (rv32emu_c_bits(insn, 9, 7) << 6);
-      return rv32emu_exec_fp_store(m, rs2, 0x3, m->cpu.x[2], (int32_t)imm);
+      return rv32emu_exec_fp_store(m, rs2, 0x3, RV32EMU_CPU(m)->x[2], (int32_t)imm);
     case 0x6: /* c.swsp */
       rs2 = rv32emu_c_bits(insn, 6, 2);
       imm = (rv32emu_c_bits(insn, 12, 9) << 2) | (rv32emu_c_bits(insn, 8, 7) << 6);
-      addr = m->cpu.x[2] + imm;
-      return rv32emu_store_value(m, addr, 0x2, m->cpu.x[rs2]);
+      addr = RV32EMU_CPU(m)->x[2] + imm;
+      return rv32emu_store_value(m, addr, 0x2, RV32EMU_CPU(m)->x[rs2]);
     case 0x7: /* c.fswsp */
       rs2 = rv32emu_c_bits(insn, 6, 2);
       imm = (rv32emu_c_bits(insn, 12, 9) << 2) | (rv32emu_c_bits(insn, 8, 7) << 6);
-      return rv32emu_exec_fp_store(m, rs2, 0x2, m->cpu.x[2], (int32_t)imm);
+      return rv32emu_exec_fp_store(m, rs2, 0x2, RV32EMU_CPU(m)->x[2], (int32_t)imm);
     default:
       rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, insn);
       return false;
@@ -920,30 +920,30 @@ static bool rv32emu_exec_one(rv32emu_machine_t *m) {
   uint32_t tmp;
   uint32_t insn16 = 0;
 
-  if ((m->cpu.pc & 1u) != 0u) {
-    rv32emu_raise_exception(m, RV32EMU_EXC_INST_MISALIGNED, m->cpu.pc);
+  if ((RV32EMU_CPU(m)->pc & 1u) != 0u) {
+    rv32emu_raise_exception(m, RV32EMU_EXC_INST_MISALIGNED, RV32EMU_CPU(m)->pc);
     return false;
   }
 
-  if (!rv32emu_virt_read(m, m->cpu.pc, 2, RV32EMU_ACC_FETCH, &insn16)) {
+  if (!rv32emu_virt_read(m, RV32EMU_CPU(m)->pc, 2, RV32EMU_ACC_FETCH, &insn16)) {
     return false;
   }
 
   if ((insn16 & 0x3u) != 0x3u) {
-    next_pc = m->cpu.pc + 2u;
+    next_pc = RV32EMU_CPU(m)->pc + 2u;
     if (!rv32emu_exec_compressed(m, (uint16_t)insn16, &next_pc)) {
       return false;
     }
 
-    m->cpu.pc = next_pc;
-    m->cpu.x[0] = 0;
-    m->cpu.cycle += 1;
-    m->cpu.instret += 1;
+    RV32EMU_CPU(m)->pc = next_pc;
+    RV32EMU_CPU(m)->x[0] = 0;
+    RV32EMU_CPU(m)->cycle += 1;
+    RV32EMU_CPU(m)->instret += 1;
     rv32emu_step_timer(m);
     return true;
   }
 
-  if (!rv32emu_virt_read(m, m->cpu.pc, 4, RV32EMU_ACC_FETCH, &insn)) {
+  if (!rv32emu_virt_read(m, RV32EMU_CPU(m)->pc, 4, RV32EMU_ACC_FETCH, &insn)) {
     return false;
   }
 
@@ -953,21 +953,21 @@ static bool rv32emu_exec_one(rv32emu_machine_t *m) {
   rs1 = rv32emu_bits(insn, 19, 15);
   rs2 = rv32emu_bits(insn, 24, 20);
   funct7 = rv32emu_bits(insn, 31, 25);
-  next_pc = m->cpu.pc + 4u;
+  next_pc = RV32EMU_CPU(m)->pc + 4u;
 
-  rs1v = m->cpu.x[rs1];
-  rs2v = m->cpu.x[rs2];
+  rs1v = RV32EMU_CPU(m)->x[rs1];
+  rs2v = RV32EMU_CPU(m)->x[rs2];
 
   switch (opcode) {
   case 0x37: /* lui */
     rv32emu_write_rd(m, rd, (uint32_t)rv32emu_imm_u(insn));
     break;
   case 0x17: /* auipc */
-    rv32emu_write_rd(m, rd, m->cpu.pc + (uint32_t)rv32emu_imm_u(insn));
+    rv32emu_write_rd(m, rd, RV32EMU_CPU(m)->pc + (uint32_t)rv32emu_imm_u(insn));
     break;
   case 0x6f: /* jal */
     rv32emu_write_rd(m, rd, next_pc);
-    next_pc = m->cpu.pc + (uint32_t)rv32emu_imm_j(insn);
+    next_pc = RV32EMU_CPU(m)->pc + (uint32_t)rv32emu_imm_j(insn);
     break;
   case 0x67: /* jalr */
     if (funct3 != 0x0) {
@@ -982,32 +982,32 @@ static bool rv32emu_exec_one(rv32emu_machine_t *m) {
     switch (funct3) {
     case 0x0:
       if (rs1v == rs2v) {
-        next_pc = m->cpu.pc + (uint32_t)rv32emu_imm_b(insn);
+        next_pc = RV32EMU_CPU(m)->pc + (uint32_t)rv32emu_imm_b(insn);
       }
       break;
     case 0x1:
       if (rs1v != rs2v) {
-        next_pc = m->cpu.pc + (uint32_t)rv32emu_imm_b(insn);
+        next_pc = RV32EMU_CPU(m)->pc + (uint32_t)rv32emu_imm_b(insn);
       }
       break;
     case 0x4:
       if ((int32_t)rs1v < (int32_t)rs2v) {
-        next_pc = m->cpu.pc + (uint32_t)rv32emu_imm_b(insn);
+        next_pc = RV32EMU_CPU(m)->pc + (uint32_t)rv32emu_imm_b(insn);
       }
       break;
     case 0x5:
       if ((int32_t)rs1v >= (int32_t)rs2v) {
-        next_pc = m->cpu.pc + (uint32_t)rv32emu_imm_b(insn);
+        next_pc = RV32EMU_CPU(m)->pc + (uint32_t)rv32emu_imm_b(insn);
       }
       break;
     case 0x6:
       if (rs1v < rs2v) {
-        next_pc = m->cpu.pc + (uint32_t)rv32emu_imm_b(insn);
+        next_pc = RV32EMU_CPU(m)->pc + (uint32_t)rv32emu_imm_b(insn);
       }
       break;
     case 0x7:
       if (rs1v >= rs2v) {
-        next_pc = m->cpu.pc + (uint32_t)rv32emu_imm_b(insn);
+        next_pc = RV32EMU_CPU(m)->pc + (uint32_t)rv32emu_imm_b(insn);
       }
       break;
     default:
@@ -1151,9 +1151,9 @@ static bool rv32emu_exec_one(rv32emu_machine_t *m) {
     }
     if (insn == 0x00000073u) { /* ecall */
       uint32_t cause = RV32EMU_EXC_ECALL_M;
-      if (m->cpu.priv == RV32EMU_PRIV_S) {
+      if (RV32EMU_CPU(m)->priv == RV32EMU_PRIV_S) {
         cause = RV32EMU_EXC_ECALL_S;
-      } else if (m->cpu.priv == RV32EMU_PRIV_U) {
+      } else if (RV32EMU_CPU(m)->priv == RV32EMU_PRIV_U) {
         cause = RV32EMU_EXC_ECALL_U;
       }
       if (!rv32emu_handle_sbi_ecall(m)) {
@@ -1163,7 +1163,7 @@ static bool rv32emu_exec_one(rv32emu_machine_t *m) {
       break;
     }
     if (insn == 0x00100073u) { /* ebreak */
-      rv32emu_raise_exception(m, RV32EMU_EXC_BREAKPOINT, m->cpu.pc);
+      rv32emu_raise_exception(m, RV32EMU_EXC_BREAKPOINT, RV32EMU_CPU(m)->pc);
       return false;
     }
     if (insn == 0x30200073u) { /* mret */
@@ -1184,7 +1184,7 @@ static bool rv32emu_exec_one(rv32emu_machine_t *m) {
       break;
     }
     if ((insn & 0xfe007fffu) == 0x12000073u) { /* sfence.vma */
-      if (m->cpu.priv == RV32EMU_PRIV_U) {
+      if (RV32EMU_CPU(m)->priv == RV32EMU_PRIV_U) {
         rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, insn);
         return false;
       }
@@ -1197,24 +1197,12 @@ static bool rv32emu_exec_one(rv32emu_machine_t *m) {
     return false;
   }
 
-  m->cpu.pc = next_pc;
-  m->cpu.x[0] = 0;
-  m->cpu.cycle += 1;
-  m->cpu.instret += 1;
+  RV32EMU_CPU(m)->pc = next_pc;
+  RV32EMU_CPU(m)->x[0] = 0;
+  RV32EMU_CPU(m)->cycle += 1;
+  RV32EMU_CPU(m)->instret += 1;
   rv32emu_step_timer(m);
   return true;
-}
-
-static void rv32emu_swap_hart_into_slot0(rv32emu_machine_t *m, uint32_t hart) {
-  rv32emu_cpu_t tmp;
-
-  if (m == NULL || hart == 0u) {
-    return;
-  }
-
-  tmp = m->harts[0];
-  m->harts[0] = m->harts[hart];
-  m->harts[hart] = tmp;
 }
 
 int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
@@ -1245,14 +1233,13 @@ int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
       }
 
       progressed = true;
-      m->active_hart = hart;
-      rv32emu_swap_hart_into_slot0(m, hart);
+      rv32emu_set_active_hart(m, hart);
 
       for (uint32_t slice = 0u;
-           slice < RV32EMU_HART_SLICE_INSTR && executed < max_instructions && m->cpu.running;
+           slice < RV32EMU_HART_SLICE_INSTR && executed < max_instructions && RV32EMU_CPU(m)->running;
            slice++) {
         if (rv32emu_check_pending_interrupt(m)) {
-          if (!m->cpu.running) {
+          if (!RV32EMU_CPU(m)->running) {
             break;
           }
           continue;
@@ -1263,13 +1250,11 @@ int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
           continue;
         }
 
-        if (!m->cpu.running) {
+        if (!RV32EMU_CPU(m)->running) {
           break;
         }
       }
 
-      rv32emu_swap_hart_into_slot0(m, hart);
-      m->active_hart = 0u;
       next_hart = (hart + 1u) % m->hart_count;
       break;
     }
@@ -1279,5 +1264,6 @@ int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
     }
   }
 
+  rv32emu_set_active_hart(m, 0u);
   return (int)executed;
 }

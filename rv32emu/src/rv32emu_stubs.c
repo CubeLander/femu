@@ -47,17 +47,17 @@ static uint32_t rv32emu_default_misa_value(void) {
 }
 
 static void rv32emu_sbi_set_legacy_ret(rv32emu_machine_t *m, int32_t value) {
-  m->cpu.x[RV32EMU_REG_A0] = (uint32_t)value;
+  RV32EMU_CPU(m)->x[RV32EMU_REG_A0] = (uint32_t)value;
 }
 
 static void rv32emu_sbi_set_ret(rv32emu_machine_t *m, int32_t error, uint32_t value) {
-  m->cpu.x[RV32EMU_REG_A0] = (uint32_t)error;
-  m->cpu.x[RV32EMU_REG_A1] = value;
+  RV32EMU_CPU(m)->x[RV32EMU_REG_A0] = (uint32_t)error;
+  RV32EMU_CPU(m)->x[RV32EMU_REG_A1] = value;
 }
 
 static uint64_t rv32emu_sbi_arg_u64(rv32emu_machine_t *m, uint32_t lo_reg) {
-  uint64_t lo = m->cpu.x[lo_reg];
-  uint64_t hi = m->cpu.x[lo_reg + 1u];
+  uint64_t lo = RV32EMU_CPU(m)->x[lo_reg];
+  uint64_t hi = RV32EMU_CPU(m)->x[lo_reg + 1u];
   return lo | (hi << 32);
 }
 
@@ -82,7 +82,7 @@ static uint32_t rv32emu_sbi_current_hartid(const rv32emu_machine_t *m) {
     return 0u;
   }
 
-  hartid = m->cpu.csr[CSR_MHARTID];
+  hartid = rv32emu_current_cpu_const(m)->csr[CSR_MHARTID];
   if (hartid >= m->hart_count) {
     return 0u;
   }
@@ -95,18 +95,18 @@ static void rv32emu_sbi_sync_timer_pending(rv32emu_machine_t *m) {
 
   if (m->opts.enable_sbi_shim) {
     if (expired) {
-      m->cpu.csr[CSR_MIP] |= MIP_STIP;
+      RV32EMU_CPU(m)->csr[CSR_MIP] |= MIP_STIP;
     } else {
-      m->cpu.csr[CSR_MIP] &= ~MIP_STIP;
+      RV32EMU_CPU(m)->csr[CSR_MIP] &= ~MIP_STIP;
     }
-    m->cpu.csr[CSR_MIP] &= ~MIP_MTIP;
+    RV32EMU_CPU(m)->csr[CSR_MIP] &= ~MIP_MTIP;
     return;
   }
 
   if (expired) {
-    m->cpu.csr[CSR_MIP] |= MIP_MTIP;
+    RV32EMU_CPU(m)->csr[CSR_MIP] |= MIP_MTIP;
   } else {
-    m->cpu.csr[CSR_MIP] &= ~MIP_MTIP;
+    RV32EMU_CPU(m)->csr[CSR_MIP] &= ~MIP_MTIP;
   }
 }
 
@@ -114,6 +114,7 @@ static void rv32emu_sbi_set_timer(rv32emu_machine_t *m, uint64_t stime_value) {
   uint32_t hartid = rv32emu_sbi_current_hartid(m);
   m->plat.clint_mtimecmp[hartid] = stime_value;
   rv32emu_sbi_sync_timer_pending(m);
+  rv32emu_timer_refresh_deadline(m);
 }
 
 static bool rv32emu_sbi_handle_legacy(rv32emu_machine_t *m, uint32_t eid) {
@@ -123,18 +124,18 @@ static bool rv32emu_sbi_handle_legacy(rv32emu_machine_t *m, uint32_t eid) {
     rv32emu_sbi_set_legacy_ret(m, 0);
     return true;
   case SBI_EXT_LEGACY_CONSOLE_PUTCHAR:
-    (void)rv32emu_phys_write(m, RV32EMU_UART_BASE, 1, m->cpu.x[RV32EMU_REG_A0] & 0xffu);
+    (void)rv32emu_phys_write(m, RV32EMU_UART_BASE, 1, RV32EMU_CPU(m)->x[RV32EMU_REG_A0] & 0xffu);
     rv32emu_sbi_set_legacy_ret(m, 0);
     return true;
   case SBI_EXT_LEGACY_CONSOLE_GETCHAR:
     rv32emu_sbi_set_legacy_ret(m, -1);
     return true;
   case SBI_EXT_LEGACY_CLEAR_IPI:
-    m->cpu.csr[CSR_MIP] &= ~MIP_MSIP;
+    RV32EMU_CPU(m)->csr[CSR_MIP] &= ~MIP_MSIP;
     rv32emu_sbi_set_legacy_ret(m, 0);
     return true;
   case SBI_EXT_LEGACY_SEND_IPI:
-    m->cpu.csr[CSR_MIP] |= MIP_MSIP;
+    RV32EMU_CPU(m)->csr[CSR_MIP] |= MIP_MSIP;
     rv32emu_sbi_set_legacy_ret(m, 0);
     return true;
   case SBI_EXT_LEGACY_REMOTE_FENCE_I:
@@ -143,7 +144,7 @@ static bool rv32emu_sbi_handle_legacy(rv32emu_machine_t *m, uint32_t eid) {
     rv32emu_sbi_set_legacy_ret(m, 0);
     return true;
   case SBI_EXT_LEGACY_SHUTDOWN:
-    m->cpu.running = false;
+    RV32EMU_CPU(m)->running = false;
     rv32emu_sbi_set_legacy_ret(m, 0);
     return true;
   default:
@@ -164,17 +165,17 @@ static bool rv32emu_sbi_handle_base(rv32emu_machine_t *m, uint32_t fid) {
     return true;
   case 3u: /* probe_extension */
     rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS,
-                        rv32emu_sbi_is_supported_extension(m->cpu.x[RV32EMU_REG_A0]) ? 1u
+                        rv32emu_sbi_is_supported_extension(RV32EMU_CPU(m)->x[RV32EMU_REG_A0]) ? 1u
                                                                                        : 0u);
     return true;
   case 4u: /* get_mvendorid */
-    rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS, m->cpu.csr[CSR_MVENDORID]);
+    rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS, RV32EMU_CPU(m)->csr[CSR_MVENDORID]);
     return true;
   case 5u: /* get_marchid */
-    rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS, m->cpu.csr[CSR_MARCHID]);
+    rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS, RV32EMU_CPU(m)->csr[CSR_MARCHID]);
     return true;
   case 6u: /* get_mimpid */
-    rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS, m->cpu.csr[CSR_MIMPID]);
+    rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS, RV32EMU_CPU(m)->csr[CSR_MIMPID]);
     return true;
   default:
     rv32emu_sbi_set_ret(m, SBI_ERR_NOT_SUPPORTED, 0);
@@ -203,8 +204,8 @@ static bool rv32emu_sbi_handle_ipi(rv32emu_machine_t *m, uint32_t fid) {
     return true;
   }
 
-  hart_mask = m->cpu.x[RV32EMU_REG_A0];
-  hart_base = m->cpu.x[RV32EMU_REG_A1];
+  hart_mask = RV32EMU_CPU(m)->x[RV32EMU_REG_A0];
+  hart_base = RV32EMU_CPU(m)->x[RV32EMU_REG_A1];
 
   for (bit = 0u; bit < 32u; bit++) {
     rv32emu_cpu_t *target;
@@ -230,7 +231,7 @@ static bool rv32emu_sbi_handle_rfence(rv32emu_machine_t *m, uint32_t fid) {
 }
 
 static bool rv32emu_sbi_handle_hsm(rv32emu_machine_t *m, uint32_t fid) {
-  uint32_t hartid = m->cpu.x[RV32EMU_REG_A0];
+  uint32_t hartid = RV32EMU_CPU(m)->x[RV32EMU_REG_A0];
   rv32emu_cpu_t *target = rv32emu_hart_cpu(m, hartid);
 
   switch (fid) {
@@ -246,10 +247,10 @@ static bool rv32emu_sbi_handle_hsm(rv32emu_machine_t *m, uint32_t fid) {
       return true;
     }
     memset(target, 0, sizeof(*target));
-    memcpy(target->csr, m->cpu.csr, sizeof(target->csr));
-    target->pc = m->cpu.x[RV32EMU_REG_A1];
+    memcpy(target->csr, RV32EMU_CPU(m)->csr, sizeof(target->csr));
+    target->pc = RV32EMU_CPU(m)->x[RV32EMU_REG_A1];
     target->x[RV32EMU_REG_A0] = hartid;
-    target->x[RV32EMU_REG_A1] = m->cpu.x[RV32EMU_REG_A2];
+    target->x[RV32EMU_REG_A1] = RV32EMU_CPU(m)->x[RV32EMU_REG_A2];
     target->priv = RV32EMU_PRIV_S;
     target->running = true;
     target->trace = m->opts.trace;
@@ -273,7 +274,7 @@ static bool rv32emu_sbi_handle_hsm(rv32emu_machine_t *m, uint32_t fid) {
     return true;
   }
   case 1u: /* hart_stop */
-    m->cpu.running = false;
+    RV32EMU_CPU(m)->running = false;
     rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS, 0);
     return true;
   case 2u: /* hart_status */
@@ -299,7 +300,7 @@ static bool rv32emu_sbi_handle_srst(rv32emu_machine_t *m, uint32_t fid) {
     return true;
   }
 
-  m->cpu.running = false;
+  RV32EMU_CPU(m)->running = false;
   rv32emu_sbi_set_ret(m, SBI_ERR_SUCCESS, 0);
   return true;
 }
@@ -308,12 +309,12 @@ bool rv32emu_handle_sbi_ecall(rv32emu_machine_t *m) {
   uint32_t eid;
   uint32_t fid;
 
-  if (m == NULL || !m->opts.enable_sbi_shim || m->cpu.priv != RV32EMU_PRIV_S) {
+  if (m == NULL || !m->opts.enable_sbi_shim || RV32EMU_CPU(m)->priv != RV32EMU_PRIV_S) {
     return false;
   }
 
-  eid = m->cpu.x[RV32EMU_REG_A7];
-  fid = m->cpu.x[RV32EMU_REG_A6];
+  eid = RV32EMU_CPU(m)->x[RV32EMU_REG_A7];
+  fid = RV32EMU_CPU(m)->x[RV32EMU_REG_A6];
 
   if (rv32emu_sbi_handle_legacy(m, eid)) {
     return true;

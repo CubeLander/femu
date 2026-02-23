@@ -119,6 +119,23 @@ static void rv32emu_sync_timer_irq_for_hart(rv32emu_machine_t *m, uint32_t harti
   }
 }
 
+static void rv32emu_sync_all_timer_irqs(rv32emu_machine_t *m) {
+  uint32_t hart;
+
+  if (m == NULL) {
+    return;
+  }
+
+  for (hart = 0u; hart < m->hart_count; hart++) {
+    rv32emu_cpu_t *cpu = rv32emu_hart_cpu(m, hart);
+    if (cpu != NULL) {
+      cpu->csr[CSR_TIME] = (uint32_t)m->plat.mtime;
+    }
+    rv32emu_sync_timer_irq_for_hart(m, hart);
+  }
+  rv32emu_timer_refresh_deadline(m);
+}
+
 static void rv32emu_update_plic_irq_lines(rv32emu_machine_t *m) {
   uint32_t hart;
 
@@ -445,6 +462,7 @@ static bool rv32emu_handle_clint_write(rv32emu_machine_t *m, uint32_t paddr, int
           (m->plat.clint_mtimecmp[hart] & 0x00000000ffffffffull) | ((uint64_t)data << 32);
     }
     rv32emu_sync_timer_irq_for_hart(m, hart);
+    rv32emu_timer_refresh_deadline(m);
     return true;
   }
 
@@ -459,13 +477,7 @@ static bool rv32emu_handle_clint_write(rv32emu_machine_t *m, uint32_t paddr, int
     return true;
   }
 
-  for (hart = 0u; hart < m->hart_count; hart++) {
-    rv32emu_cpu_t *cpu = rv32emu_hart_cpu(m, hart);
-    if (cpu != NULL) {
-      cpu->csr[CSR_TIME] = (uint32_t)m->plat.mtime;
-    }
-    rv32emu_sync_timer_irq_for_hart(m, hart);
-  }
+  rv32emu_sync_all_timer_irqs(m);
   return true;
 }
 
@@ -585,20 +597,28 @@ static bool rv32emu_handle_plic_write(rv32emu_machine_t *m, uint32_t paddr, int 
 }
 
 void rv32emu_step_timer(rv32emu_machine_t *m) {
-  uint32_t hart;
+  rv32emu_cpu_t *cpu;
 
   if (m == NULL) {
     return;
   }
 
   m->plat.mtime += 1;
-  for (hart = 0u; hart < m->hart_count; hart++) {
-    rv32emu_cpu_t *cpu = rv32emu_hart_cpu(m, hart);
-    if (cpu != NULL) {
-      cpu->csr[CSR_TIME] = (uint32_t)m->plat.mtime;
-    }
-    rv32emu_sync_timer_irq_for_hart(m, hart);
+  cpu = RV32EMU_CPU(m);
+  if (cpu != NULL) {
+    cpu->csr[CSR_TIME] = (uint32_t)m->plat.mtime;
   }
+
+  if (m->plat.mtime < m->plat.next_timer_deadline) {
+    return;
+  }
+
+  /*
+   * Event-driven timer path: only when we reach the cached next deadline do we
+   * resynchronize all harts' timer pending bits and compute the following
+   * deadline. This removes the per-instruction O(hart_count) scan.
+   */
+  rv32emu_sync_all_timer_irqs(m);
 }
 
 static bool rv32emu_handle_virtio_mmio_read(rv32emu_machine_t *m, uint32_t paddr, int len,

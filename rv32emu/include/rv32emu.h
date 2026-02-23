@@ -165,6 +165,7 @@ typedef struct {
   uint64_t mtime;
   uint64_t clint_mtimecmp[RV32EMU_MAX_HARTS];
   uint32_t clint_msip[RV32EMU_MAX_HARTS];
+  uint64_t next_timer_deadline;
 
   uint32_t plic_pending;
   uint32_t plic_enable[RV32EMU_MAX_PLIC_CONTEXTS];
@@ -204,22 +205,12 @@ typedef struct {
   };
   uint32_t hart_count;
   uint32_t active_hart;
+  rv32emu_cpu_t *cpu_cur;
 } rv32emu_machine_t;
 
 static inline uint32_t rv32emu_hart_slot(const rv32emu_machine_t *m, uint32_t hartid) {
   if (m == NULL || hartid >= m->hart_count || hartid >= RV32EMU_MAX_HARTS) {
     return RV32EMU_MAX_HARTS;
-  }
-
-  if (m->active_hart == 0u || m->active_hart >= m->hart_count) {
-    return hartid;
-  }
-
-  if (hartid == 0u) {
-    return m->active_hart;
-  }
-  if (hartid == m->active_hart) {
-    return 0u;
   }
   return hartid;
 }
@@ -239,6 +230,81 @@ static inline const rv32emu_cpu_t *rv32emu_hart_cpu_const(const rv32emu_machine_
     return NULL;
   }
   return &m->harts[slot];
+}
+
+static inline rv32emu_cpu_t *rv32emu_current_cpu(rv32emu_machine_t *m) {
+  if (m == NULL || m->hart_count == 0u) {
+    return NULL;
+  }
+  if (m->cpu_cur == NULL) {
+    return &m->harts[0];
+  }
+  return m->cpu_cur;
+}
+
+static inline const rv32emu_cpu_t *rv32emu_current_cpu_const(const rv32emu_machine_t *m) {
+  if (m == NULL || m->hart_count == 0u) {
+    return NULL;
+  }
+  if (m->cpu_cur == NULL) {
+    return &m->harts[0];
+  }
+  return m->cpu_cur;
+}
+
+static inline rv32emu_cpu_t *rv32emu_current_cpu_fast(rv32emu_machine_t *m) {
+  return m->cpu_cur;
+}
+
+static inline const rv32emu_cpu_t *rv32emu_current_cpu_const_fast(const rv32emu_machine_t *m) {
+  return m->cpu_cur;
+}
+
+static inline void rv32emu_set_active_hart(rv32emu_machine_t *m, uint32_t hartid) {
+  if (m == NULL || m->hart_count == 0u || hartid >= m->hart_count) {
+    if (m != NULL) {
+      m->active_hart = 0u;
+      m->cpu_cur = (m->hart_count == 0u) ? NULL : &m->harts[0];
+    }
+    return;
+  }
+
+  m->active_hart = hartid;
+  m->cpu_cur = &m->harts[hartid];
+}
+
+#define RV32EMU_CPU(m) rv32emu_current_cpu_fast(m)
+#define RV32EMU_CPU_CONST(m) rv32emu_current_cpu_const_fast(m)
+
+static inline uint64_t rv32emu_timer_next_deadline(const rv32emu_machine_t *m) {
+  uint64_t next = UINT64_MAX;
+  uint32_t hart;
+
+  if (m == NULL) {
+    return UINT64_MAX;
+  }
+
+  for (hart = 0u; hart < m->hart_count; hart++) {
+    uint64_t cmp = m->plat.clint_mtimecmp[hart];
+
+    /*
+     * Only future comparators are candidates for the next event.
+     * Expired comparators (cmp <= mtime) already have pending IRQ state, and
+     * including them would force a pointless full-hart scan every instruction.
+     */
+    if (cmp > m->plat.mtime && cmp < next) {
+      next = cmp;
+    }
+  }
+
+  return next;
+}
+
+static inline void rv32emu_timer_refresh_deadline(rv32emu_machine_t *m) {
+  if (m == NULL) {
+    return;
+  }
+  m->plat.next_timer_deadline = rv32emu_timer_next_deadline(m);
 }
 
 static inline bool rv32emu_any_hart_running(const rv32emu_machine_t *m) {

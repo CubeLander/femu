@@ -89,18 +89,18 @@ static void rv32emu_take_trap(rv32emu_machine_t *m, uint32_t cause, uint32_t tva
     cause_value |= 0x80000000u;
   }
 
-  deleg_mask = is_interrupt ? m->cpu.csr[CSR_MIDELEG] : m->cpu.csr[CSR_MEDELEG];
-  if (m->cpu.priv != RV32EMU_PRIV_M) {
+  deleg_mask = is_interrupt ? RV32EMU_CPU(m)->csr[CSR_MIDELEG] : RV32EMU_CPU(m)->csr[CSR_MEDELEG];
+  if (RV32EMU_CPU(m)->priv != RV32EMU_PRIV_M) {
     delegated_to_s = (deleg_mask & (1u << cause_bit)) != 0u;
   }
 
   if (delegated_to_s) {
-    uint32_t mstatus = m->cpu.csr[CSR_MSTATUS];
-    uint32_t stvec_base = m->cpu.csr[CSR_STVEC] & ~0x3u;
+    uint32_t mstatus = RV32EMU_CPU(m)->csr[CSR_MSTATUS];
+    uint32_t stvec_base = RV32EMU_CPU(m)->csr[CSR_STVEC] & ~0x3u;
 
-    m->cpu.csr[CSR_SEPC] = m->cpu.pc;
-    m->cpu.csr[CSR_SCAUSE] = cause_value;
-    m->cpu.csr[CSR_STVAL] = tval;
+    RV32EMU_CPU(m)->csr[CSR_SEPC] = RV32EMU_CPU(m)->pc;
+    RV32EMU_CPU(m)->csr[CSR_SCAUSE] = cause_value;
+    RV32EMU_CPU(m)->csr[CSR_STVAL] = tval;
 
     if ((mstatus & MSTATUS_SIE) != 0u) {
       mstatus |= MSTATUS_SPIE;
@@ -109,31 +109,31 @@ static void rv32emu_take_trap(rv32emu_machine_t *m, uint32_t cause, uint32_t tva
     }
     mstatus &= ~MSTATUS_SIE;
 
-    if (m->cpu.priv == RV32EMU_PRIV_S) {
+    if (RV32EMU_CPU(m)->priv == RV32EMU_PRIV_S) {
       mstatus |= MSTATUS_SPP;
     } else {
       mstatus &= ~MSTATUS_SPP;
     }
 
-    tvec_mode = m->cpu.csr[CSR_STVEC] & 0x3u;
+    tvec_mode = RV32EMU_CPU(m)->csr[CSR_STVEC] & 0x3u;
     if (is_interrupt && tvec_mode == 1u) {
       stvec_base += cause_bit * 4u;
     }
 
-    m->cpu.csr[CSR_MSTATUS] = mstatus;
-    m->cpu.priv = RV32EMU_PRIV_S;
-    m->cpu.pc = stvec_base;
-    m->cpu.running = (stvec_base != 0u);
+    RV32EMU_CPU(m)->csr[CSR_MSTATUS] = mstatus;
+    RV32EMU_CPU(m)->priv = RV32EMU_PRIV_S;
+    RV32EMU_CPU(m)->pc = stvec_base;
+    RV32EMU_CPU(m)->running = (stvec_base != 0u);
     return;
   }
 
   {
-    uint32_t mstatus = m->cpu.csr[CSR_MSTATUS];
-    uint32_t mtvec_base = m->cpu.csr[CSR_MTVEC] & ~0x3u;
+    uint32_t mstatus = RV32EMU_CPU(m)->csr[CSR_MSTATUS];
+    uint32_t mtvec_base = RV32EMU_CPU(m)->csr[CSR_MTVEC] & ~0x3u;
 
-    m->cpu.csr[CSR_MEPC] = m->cpu.pc;
-    m->cpu.csr[CSR_MCAUSE] = cause_value;
-    m->cpu.csr[CSR_MTVAL] = tval;
+    RV32EMU_CPU(m)->csr[CSR_MEPC] = RV32EMU_CPU(m)->pc;
+    RV32EMU_CPU(m)->csr[CSR_MCAUSE] = cause_value;
+    RV32EMU_CPU(m)->csr[CSR_MTVAL] = tval;
 
     if ((mstatus & MSTATUS_MIE) != 0u) {
       mstatus |= MSTATUS_MPIE;
@@ -142,17 +142,17 @@ static void rv32emu_take_trap(rv32emu_machine_t *m, uint32_t cause, uint32_t tva
     }
     mstatus &= ~MSTATUS_MIE;
     mstatus = (mstatus & ~MSTATUS_MPP_MASK) |
-              (((uint32_t)m->cpu.priv << MSTATUS_MPP_SHIFT) & MSTATUS_MPP_MASK);
+              (((uint32_t)RV32EMU_CPU(m)->priv << MSTATUS_MPP_SHIFT) & MSTATUS_MPP_MASK);
 
-    tvec_mode = m->cpu.csr[CSR_MTVEC] & 0x3u;
+    tvec_mode = RV32EMU_CPU(m)->csr[CSR_MTVEC] & 0x3u;
     if (is_interrupt && tvec_mode == 1u) {
       mtvec_base += cause_bit * 4u;
     }
 
-    m->cpu.csr[CSR_MSTATUS] = mstatus;
-    m->cpu.priv = RV32EMU_PRIV_M;
-    m->cpu.pc = mtvec_base;
-    m->cpu.running = (mtvec_base != 0u);
+    RV32EMU_CPU(m)->csr[CSR_MSTATUS] = mstatus;
+    RV32EMU_CPU(m)->priv = RV32EMU_PRIV_M;
+    RV32EMU_CPU(m)->pc = mtvec_base;
+    RV32EMU_CPU(m)->running = (mtvec_base != 0u);
   }
 }
 
@@ -170,12 +170,12 @@ bool rv32emu_translate(rv32emu_machine_t *m, uint32_t vaddr, rv32emu_access_t ac
     return false;
   }
 
-  satp = m->cpu.csr[CSR_SATP];
+  satp = RV32EMU_CPU(m)->csr[CSR_SATP];
   mstatus = rv32emu_csr_read(m, CSR_MSTATUS);
-  effective_priv = m->cpu.priv;
+  effective_priv = RV32EMU_CPU(m)->priv;
 
   /* MPRV affects data accesses in M-mode by using MPP translation context. */
-  if (m->cpu.priv == RV32EMU_PRIV_M && access != RV32EMU_ACC_FETCH &&
+  if (RV32EMU_CPU(m)->priv == RV32EMU_PRIV_M && access != RV32EMU_ACC_FETCH &&
       (mstatus & MSTATUS_MPRV) != 0u) {
     effective_priv = (rv32emu_priv_t)((mstatus & MSTATUS_MPP_MASK) >> MSTATUS_MPP_SHIFT);
   }
@@ -348,7 +348,7 @@ void rv32emu_raise_interrupt(rv32emu_machine_t *m, uint32_t cause_num) {
     return;
   }
 
-  m->cpu.csr[CSR_MIP] |= (1u << cause_num);
+  RV32EMU_CPU(m)->csr[CSR_MIP] |= (1u << cause_num);
 }
 
 bool rv32emu_check_pending_interrupt(rv32emu_machine_t *m) {
@@ -363,8 +363,8 @@ bool rv32emu_check_pending_interrupt(rv32emu_machine_t *m) {
   }
 
   enabled_pending = rv32emu_csr_read(m, CSR_MIE) & rv32emu_csr_read(m, CSR_MIP);
-  mstatus = m->cpu.csr[CSR_MSTATUS];
-  mideleg = m->cpu.csr[CSR_MIDELEG];
+  mstatus = RV32EMU_CPU(m)->csr[CSR_MSTATUS];
+  mideleg = RV32EMU_CPU(m)->csr[CSR_MIDELEG];
 
   for (uint32_t i = 0; i < sizeof(priority) / sizeof(priority[0]); i++) {
     uint32_t cause = priority[i];
@@ -377,16 +377,16 @@ bool rv32emu_check_pending_interrupt(rv32emu_machine_t *m) {
     }
 
     if (delegated) {
-      if (m->cpu.priv == RV32EMU_PRIV_M) {
+      if (RV32EMU_CPU(m)->priv == RV32EMU_PRIV_M) {
         continue;
       }
-      if (m->cpu.priv == RV32EMU_PRIV_S) {
+      if (RV32EMU_CPU(m)->priv == RV32EMU_PRIV_S) {
         global_enabled = (mstatus & MSTATUS_SIE) != 0u;
       } else {
         global_enabled = true;
       }
     } else {
-      if (m->cpu.priv == RV32EMU_PRIV_M) {
+      if (RV32EMU_CPU(m)->priv == RV32EMU_PRIV_M) {
         global_enabled = (mstatus & MSTATUS_MIE) != 0u;
       } else {
         global_enabled = true;

@@ -50,7 +50,7 @@ bool rv32emu_platform_init(rv32emu_machine_t *m, const rv32emu_options_t *opts) 
     return false;
   }
   m->hart_count = m->opts.hart_count;
-  m->active_hart = 0u;
+  rv32emu_set_active_hart(m, 0u);
 
   m->plat.dram_base = RV32EMU_DRAM_BASE;
   m->plat.dram_size = m->opts.ram_mb * 1024u * 1024u;
@@ -64,6 +64,7 @@ bool rv32emu_platform_init(rv32emu_machine_t *m, const rv32emu_options_t *opts) 
     m->plat.clint_mtimecmp[hart] = UINT64_MAX;
     m->plat.clint_msip[hart] = 0u;
   }
+  rv32emu_timer_refresh_deadline(m);
   for (context = 0u; context < RV32EMU_MAX_PLIC_CONTEXTS; context++) {
     m->plat.plic_enable[context] = 0u;
     m->plat.plic_claim[context] = 0u;

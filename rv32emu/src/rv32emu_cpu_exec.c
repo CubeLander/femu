@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <limits.h>
+#include <stdlib.h>
+#include <pthread.h>
 
 #define RV32EMU_HART_SLICE_INSTR 64u
 
@@ -1205,21 +1207,9 @@ static bool rv32emu_exec_one(rv32emu_machine_t *m) {
   return true;
 }
 
-int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
+static int rv32emu_run_single_thread(rv32emu_machine_t *m, uint64_t max_instructions) {
   uint64_t executed = 0;
   uint32_t next_hart = 0;
-
-  if (m == NULL) {
-    return -1;
-  }
-
-  if (m->hart_count == 0u || m->hart_count > RV32EMU_MAX_HARTS) {
-    return -1;
-  }
-
-  if (max_instructions == 0) {
-    max_instructions = RV32EMU_DEFAULT_MAX_INSTR;
-  }
 
   while (executed < max_instructions) {
     bool progressed = false;
@@ -1266,4 +1256,200 @@ int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
 
   rv32emu_set_active_hart(m, 0u);
   return (int)executed;
+}
+
+typedef struct {
+  pthread_mutex_t lock;
+  pthread_cond_t cv;
+  uint64_t executed;
+  bool stop;
+  uint32_t turn;
+} rv32emu_thread_state_t;
+
+typedef struct {
+  rv32emu_machine_t *m;
+  rv32emu_thread_state_t *state;
+  uint64_t max_instructions;
+  uint32_t hartid;
+} rv32emu_worker_ctx_t;
+
+static uint32_t rv32emu_next_running_hart(const rv32emu_machine_t *m, uint32_t start) {
+  uint32_t checked;
+
+  if (m == NULL || m->hart_count == 0u) {
+    return 0u;
+  }
+
+  for (checked = 0u; checked < m->hart_count; checked++) {
+    uint32_t hart = (start + checked) % m->hart_count;
+    if (m->harts[hart].running) {
+      return hart;
+    }
+  }
+
+  return m->hart_count;
+}
+
+static void *rv32emu_run_worker(void *opaque) {
+  rv32emu_worker_ctx_t *ctx = (rv32emu_worker_ctx_t *)opaque;
+  rv32emu_thread_state_t *state = ctx->state;
+
+  if (pthread_mutex_lock(&state->lock) != 0) {
+    return NULL;
+  }
+
+  for (;;) {
+    while (!state->stop && state->executed < ctx->max_instructions && state->turn != ctx->hartid) {
+      (void)pthread_cond_wait(&state->cv, &state->lock);
+    }
+
+    if (state->stop || state->executed >= ctx->max_instructions) {
+      break;
+    }
+
+    /*
+     * Keep the historical slice scheduler semantics by handing a run-token to
+     * one hart thread at a time. This keeps behavior stable while introducing
+     * per-hart host threads for concurrency experiments.
+     */
+    rv32emu_set_active_hart(ctx->m, ctx->hartid);
+
+    if (RV32EMU_CPU(ctx->m)->running) {
+      for (uint32_t slice = 0u;
+           slice < RV32EMU_HART_SLICE_INSTR && state->executed < ctx->max_instructions &&
+           RV32EMU_CPU(ctx->m)->running;
+           slice++) {
+        if (rv32emu_check_pending_interrupt(ctx->m)) {
+          if (!RV32EMU_CPU(ctx->m)->running) {
+            break;
+          }
+          continue;
+        }
+
+        if (rv32emu_exec_one(ctx->m)) {
+          state->executed += 1;
+          continue;
+        }
+
+        if (!RV32EMU_CPU(ctx->m)->running) {
+          break;
+        }
+      }
+    }
+
+    if (state->executed >= ctx->max_instructions) {
+      state->stop = true;
+      (void)pthread_cond_broadcast(&state->cv);
+      break;
+    }
+
+    {
+      uint32_t next = rv32emu_next_running_hart(ctx->m, (ctx->hartid + 1u) % ctx->m->hart_count);
+      if (next >= ctx->m->hart_count) {
+        state->stop = true;
+      } else {
+        state->turn = next;
+      }
+    }
+
+    (void)pthread_cond_broadcast(&state->cv);
+  }
+
+  (void)pthread_cond_broadcast(&state->cv);
+  (void)pthread_mutex_unlock(&state->lock);
+  return NULL;
+}
+
+static int rv32emu_run_threaded(rv32emu_machine_t *m, uint64_t max_instructions) {
+  pthread_t threads[RV32EMU_MAX_HARTS];
+  rv32emu_worker_ctx_t workers[RV32EMU_MAX_HARTS];
+  rv32emu_thread_state_t state;
+  uint32_t hart;
+  uint32_t started = 0;
+  bool create_failed = false;
+
+  if (pthread_mutex_init(&state.lock, NULL) != 0) {
+    return rv32emu_run_single_thread(m, max_instructions);
+  }
+  if (pthread_cond_init(&state.cv, NULL) != 0) {
+    (void)pthread_mutex_destroy(&state.lock);
+    return rv32emu_run_single_thread(m, max_instructions);
+  }
+
+  state.executed = 0;
+  state.stop = false;
+  state.turn = rv32emu_next_running_hart(m, 0u);
+  if (state.turn >= m->hart_count) {
+    state.stop = true;
+  }
+
+  for (hart = 0u; hart < m->hart_count; hart++) {
+    workers[hart].m = m;
+    workers[hart].state = &state;
+    workers[hart].max_instructions = max_instructions;
+    workers[hart].hartid = hart;
+
+    if (pthread_create(&threads[hart], NULL, rv32emu_run_worker, &workers[hart]) != 0) {
+      create_failed = true;
+      break;
+    }
+    started++;
+  }
+
+  if (create_failed) {
+    if (pthread_mutex_lock(&state.lock) == 0) {
+      state.stop = true;
+      (void)pthread_cond_broadcast(&state.cv);
+      (void)pthread_mutex_unlock(&state.lock);
+    }
+  }
+
+  for (hart = 0u; hart < started; hart++) {
+    (void)pthread_join(threads[hart], NULL);
+  }
+  (void)pthread_cond_destroy(&state.cv);
+  (void)pthread_mutex_destroy(&state.lock);
+
+  if (create_failed && state.executed < max_instructions && rv32emu_any_hart_running(m)) {
+    int tail = rv32emu_run_single_thread(m, max_instructions - state.executed);
+    if (tail < 0) {
+      return -1;
+    }
+    state.executed += (uint64_t)tail;
+  }
+
+  rv32emu_set_active_hart(m, 0u);
+  return (int)state.executed;
+}
+
+int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
+  const char *threaded_env;
+
+  if (m == NULL) {
+    return -1;
+  }
+
+  if (m->hart_count == 0u || m->hart_count > RV32EMU_MAX_HARTS) {
+    return -1;
+  }
+
+  if (max_instructions == 0) {
+    max_instructions = RV32EMU_DEFAULT_MAX_INSTR;
+  }
+
+  if (m->hart_count == 1u) {
+    return rv32emu_run_single_thread(m, max_instructions);
+  }
+
+  /*
+   * Experimental mode: one host thread per hart. Keep default as single-thread
+   * scheduler to preserve baseline performance and behavior until this path is
+   * further optimized.
+   */
+  threaded_env = getenv("RV32EMU_EXPERIMENTAL_HART_THREADS");
+  if (threaded_env == NULL || threaded_env[0] != '1') {
+    return rv32emu_run_single_thread(m, max_instructions);
+  }
+
+  return rv32emu_run_threaded(m, max_instructions);
 }

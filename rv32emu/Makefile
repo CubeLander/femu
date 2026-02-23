@@ -3,6 +3,7 @@ AR ?= ar
 
 CFLAGS ?= -std=c11 -Wall -Wextra -Werror -O2
 CPPFLAGS ?= -Iinclude
+THREAD_FLAGS ?= -pthread
 
 BUILD_DIR := build
 SRCS := $(wildcard src/*.c)
@@ -18,26 +19,26 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 $(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(THREAD_FLAGS) -MMD -MP -c $< -o $@
 
 $(LIB): $(OBJS)
 	rm -f $@
 	$(AR) rcs $@ $^
 
 $(BUILD_DIR)/test_platform: tests/test_platform.c $(LIB) | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LIB) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(THREAD_FLAGS) $< $(LIB) -o $@
 
 $(BUILD_DIR)/test_run: tests/test_run.c $(LIB) | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LIB) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(THREAD_FLAGS) $< $(LIB) -o $@
 
 $(BUILD_DIR)/test_system: tests/test_system.c $(LIB) | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LIB) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(THREAD_FLAGS) $< $(LIB) -o $@
 
 $(BUILD_DIR)/test_loader: tests/test_loader.c $(LIB) | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LIB) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(THREAD_FLAGS) $< $(LIB) -o $@
 
 $(EMU_BIN): tools/rv32emu_main.c $(LIB) | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LIB) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(THREAD_FLAGS) $< $(LIB) -o $@
 
 rv32emu: $(EMU_BIN)
 

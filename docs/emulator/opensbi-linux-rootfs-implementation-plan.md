@@ -183,18 +183,28 @@
    - 新增内核配置片段：`scripts/config/linux-rv32-smp.config`
    - 新增构建目标：`make build-linux-smp`
    - 新增 smoke 目标：`make smoke-emulator-smp`
-   - 次核可被 OpenSBI+CLINT `MSIP` 路径拉起（`hart1 state: running=1`）。
+   - `smoke-emulator-smp` 调整为两阶段验收：
+     - 阶段1：`hart_count=1` + SMP kernel，校验 `Linux banner/init handoff`。
+     - 阶段2：`hart_count=2`，校验次核拉起（`hart1 state: running=1`）。
    - 参考日志：`docs/logs/2026-02-22-emulator-smp-hart1-pass.log`
+9. LR/SC 多核语义补强：
+   - 在 `virt_write` 成功后按地址区间失效所有 hart 的 LR reservation，避免跨核写后 `sc.w` 误成功。
+   - 新增单测：`test_multihart_lr_sc_invalidation`。
+10. 多核调度开销优化：
+   - `rv32emu_run()` 改为每 hart 小时间片（64 指令）轮转，减少每条指令级别的 hart 状态交换开销。
+11. OpenSBI 多核启动模型修正：
+   - OpenSBI 路径下，所有 hart 从固件入口启动；SBI shim 路径下保持仅 hart0 启动。
+   - 新增严格双核验收目标：`make smoke-emulator-smp-linux`（stage2 验证 `Linux banner/cmdline/init handoff + hart1 running`）。
 
 当前限制：
 1. IPI/RFENCE 仍为最小实现，不足以支撑完整 Linux SMP。
 2. 当前调度为单线程轮转，不包含 host 并行。
 3. PLIC 仍是最小子集（仅低 32 路中断、priority/threshold 语义未完整建模）。
-4. SMP 场景的 Linux 串口日志尚不稳定（`Linux version` marker 可能缺失），需要补充可观测性与根因定位。
+4. 默认 `make smoke-emulator-smp` 的 stage2 仍是快速次核拉起检查（120M 指令）；完整双核 Linux marker 验证由 `make smoke-emulator-smp-linux` 承担。
 
 下一步（阶段 G-2 / G-3）：
 1. 在现有 `MSIP` 唤醒路径基础上，补齐 IPI/RFENCE 的 hart-mask 语义与状态一致性检查。
-2. 定位 SMP 下 Linux 串口 marker 丢失问题，恢复 `Linux banner/init handoff` 级别的自动化验收。
+2. 评估将 `smoke-emulator-smp-linux` 的双核严格 marker 检查提升为默认 CI 档位（或 nightly）。
 3. 扩展 PLIC 语义并引入更多中断源做回归。
 
 ## 5. 推荐里程碑

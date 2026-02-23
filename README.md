@@ -47,6 +47,7 @@ make smoke-emulator
 make smoke-emulator-strict
 make smoke-emulator-interactive
 make smoke-emulator-smp
+make smoke-emulator-smp-linux
 make check-boot-contract
 make rv32emu-test
 make rv32emu-bin
@@ -84,9 +85,15 @@ SMP kernel bring-up smoke (2 harts):
 ```bash
 make build-linux-smp
 make smoke-emulator-smp
+make smoke-emulator-smp-linux
 ```
 
-`smoke-emulator-smp` currently validates OpenSBI boot plus `hart1 state: running=1` in emulator log.
+`smoke-emulator-smp` now runs two stages:
+1. SMP kernel strict boot marker check with `hart_count=1` (Linux banner + init handoff).
+2. Dual-hart wakeup check with `hart_count=2` (`hart1 state: running=1`).
+
+`smoke-emulator-smp-linux` keeps stage 1 and upgrades stage 2 to strict dual-hart Linux markers
+(`Linux banner` + `kernel cmdline` + `init handoff` + `hart1 running`).
 
 If cross compiler is missing, run:
 

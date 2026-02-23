@@ -450,7 +450,13 @@ int main(int argc, char **argv) {
     }
     hart_cpu->pc = opensbi_entry;
     hart_cpu->priv = RV32EMU_PRIV_M;
-    hart_cpu->running = (hart == 0u);
+    /*
+     * OpenSBI expects every hart to enter firmware and park on its warmboot
+     * path; later HSM/IPI flow wakes secondaries from that parked state.
+     * When we boot through the built-in SBI shim (no OpenSBI firmware),
+     * keep only hart0 running so Linux starts secondaries via hart_start().
+     */
+    hart_cpu->running = cli.sbi_shim ? (hart == 0u) : true;
     hart_cpu->x[10] = hart; /* a0 = hartid */
     hart_cpu->x[11] = cli.dtb_load_addr; /* a1 = dtb */
     hart_cpu->x[12] = cli.use_fw_dynamic ? cli.fw_dynamic_info_addr : 0u; /* a2 */

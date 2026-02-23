@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <limits.h>
 
+#define RV32EMU_HART_SLICE_INSTR 64u
+
 static inline uint32_t rv32emu_bits(uint32_t value, int hi, int lo) {
   return (value >> lo) & ((1u << (hi - lo + 1)) - 1u);
 }
@@ -532,6 +534,15 @@ static bool rv32emu_exec_amo(rv32emu_machine_t *m, uint32_t insn) {
       rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, insn);
       return false;
     }
+    /*
+     * lr.w:
+     * - load the target word;
+     * - create a reservation on that address for the current hart.
+     *
+     * Reservation state is represented by (lr_valid, lr_addr). It may be
+     * invalidated later by any committed overlapping store from any hart
+     * (see rv32emu_virt_write() invalidation hook).
+     */
     if (!rv32emu_virt_read(m, addr, 4, RV32EMU_ACC_LOAD, &old_val)) {
       return false;
     }
@@ -544,6 +555,17 @@ static bool rv32emu_exec_amo(rv32emu_machine_t *m, uint32_t insn) {
   if (funct5 == 0x3u) { /* sc.w */
     uint32_t status = 1u;
 
+    /*
+     * sc.w succeeds only when the reservation is still valid and points to
+     * the same word address. On success:
+     * - perform the store;
+     * - write rd=0.
+     * On failure:
+     * - do not store;
+     * - write rd=1.
+     *
+     * In both cases, sc.w consumes/clears the local reservation.
+     */
     if (m->cpu.lr_valid && m->cpu.lr_addr == addr) {
       if (!rv32emu_virt_write(m, addr, 4, RV32EMU_ACC_STORE, rs2v)) {
         return false;
@@ -595,6 +617,10 @@ static bool rv32emu_exec_amo(rv32emu_machine_t *m, uint32_t insn) {
   if (!rv32emu_virt_write(m, addr, 4, RV32EMU_ACC_STORE, new_val)) {
     return false;
   }
+  /*
+   * AMO writes are regular stores from LR/SC perspective, so clear local
+   * reservation as well. Cross-hart invalidation is handled by virt_write().
+   */
   m->cpu.lr_valid = false;
   rv32emu_write_rd(m, rd, old_val);
   return true;
@@ -1179,6 +1205,18 @@ static bool rv32emu_exec_one(rv32emu_machine_t *m) {
   return true;
 }
 
+static void rv32emu_swap_hart_into_slot0(rv32emu_machine_t *m, uint32_t hart) {
+  rv32emu_cpu_t tmp;
+
+  if (m == NULL || hart == 0u) {
+    return;
+  }
+
+  tmp = m->harts[0];
+  m->harts[0] = m->harts[hart];
+  m->harts[hart] = tmp;
+}
+
 int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
   uint64_t executed = 0;
   uint32_t next_hart = 0;
@@ -1208,33 +1246,29 @@ int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
 
       progressed = true;
       m->active_hart = hart;
+      rv32emu_swap_hart_into_slot0(m, hart);
 
-      if (hart != 0u) {
-        rv32emu_cpu_t tmp = m->harts[0];
-        m->harts[0] = m->harts[hart];
-        m->harts[hart] = tmp;
-      }
-
-      if (rv32emu_check_pending_interrupt(m)) {
-        if (hart != 0u) {
-          rv32emu_cpu_t tmp = m->harts[0];
-          m->harts[0] = m->harts[hart];
-          m->harts[hart] = tmp;
+      for (uint32_t slice = 0u;
+           slice < RV32EMU_HART_SLICE_INSTR && executed < max_instructions && m->cpu.running;
+           slice++) {
+        if (rv32emu_check_pending_interrupt(m)) {
+          if (!m->cpu.running) {
+            break;
+          }
+          continue;
         }
-        m->active_hart = 0u;
-        next_hart = (hart + 1u) % m->hart_count;
-        break;
+
+        if (rv32emu_exec_one(m)) {
+          executed += 1;
+          continue;
+        }
+
+        if (!m->cpu.running) {
+          break;
+        }
       }
 
-      if (rv32emu_exec_one(m)) {
-        executed += 1;
-      }
-
-      if (hart != 0u) {
-        rv32emu_cpu_t tmp = m->harts[0];
-        m->harts[0] = m->harts[hart];
-        m->harts[hart] = tmp;
-      }
+      rv32emu_swap_hart_into_slot0(m, hart);
       m->active_hart = 0u;
       next_hart = (hart + 1u) % m->hart_count;
       break;

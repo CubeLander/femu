@@ -85,7 +85,16 @@ smoke-emulator-interactive: rv32emu-bin build-linux build-opensbi build-busybox-
 	./scripts/smoke-emulator-interactive.sh
 
 smoke-emulator-smp: rv32emu-bin build-linux-smp build-opensbi build-busybox-rv32 build-rootfs
-	KERNEL_IMAGE="$(PWD)/out/linux-smp/arch/riscv/boot/Image" HART_COUNT=2 DTB_HART_COUNT=2 TIMEOUT_SEC=120 MAX_INSTR=120000000 REQUIRE_LINUX_BANNER=0 REQUIRE_INIT_MARKER=0 REQUIRE_SECONDARY_HART=1 SECONDARY_HART_ID=1 ./scripts/smoke-emulator.sh
+	KERNEL_IMAGE="$(PWD)/out/linux-smp/arch/riscv/boot/Image" ./scripts/smoke-emulator-smp.sh
+
+smoke-emulator-smp-linux: rv32emu-bin build-linux-smp build-opensbi build-busybox-rv32 build-rootfs
+	KERNEL_IMAGE="$(PWD)/out/linux-smp/arch/riscv/boot/Image" \
+	STAGE2_MAX_INSTR=1200000000 \
+	STAGE2_ALLOW_INIT_PANIC=0 \
+	STAGE2_REQUIRE_LINUX_BANNER=1 \
+	STAGE2_REQUIRE_INIT_MARKER=1 \
+	STAGE2_REQUIRE_SECONDARY_HART=1 \
+	./scripts/smoke-emulator-smp.sh
 
 bootstrap: build-toolchain fetch-sources build-busybox build-linux build-opensbi build-rootfs
 	@echo "[OK] bootstrap artifacts are ready under out/"
@@ -93,4 +102,4 @@ bootstrap: build-toolchain fetch-sources build-busybox build-linux build-opensbi
 build-all: build-busybox build-linux build-opensbi build-rootfs
 	@echo "[OK] all build artifacts are ready under out/"
 
-.PHONY: default clean submit info setup password dev-shell fetch-sources build-toolchain install-rv32-toolchain build-busybox build-busybox-rv32 build-linux build-linux-smp build-opensbi build-rootfs smoke-qemu smoke-qemu-strict dump-dtb takeaway check-env check-boot-contract rv32emu-test rv32emu-bin smoke-emulator smoke-emulator-strict smoke-emulator-interactive smoke-emulator-smp bootstrap build-all
+.PHONY: default clean submit info setup password dev-shell fetch-sources build-toolchain install-rv32-toolchain build-busybox build-busybox-rv32 build-linux build-linux-smp build-opensbi build-rootfs smoke-qemu smoke-qemu-strict dump-dtb takeaway check-env check-boot-contract rv32emu-test rv32emu-bin smoke-emulator smoke-emulator-strict smoke-emulator-interactive smoke-emulator-smp smoke-emulator-smp-linux bootstrap build-all

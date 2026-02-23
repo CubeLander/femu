@@ -128,10 +128,73 @@ static void test_multihart_round_robin(void) {
   rv32emu_platform_destroy(&m);
 }
 
+static void test_multihart_lr_sc_invalidation(void) {
+  rv32emu_machine_t m;
+  rv32emu_options_t opts;
+  uint32_t pc0;
+  uint32_t pc1;
+  uint32_t shared_addr;
+  uint32_t sc_pc;
+  uint32_t value;
+  uint32_t prog1[] = {
+      0x0030a023u, /* sw x3, 0(x1) */
+      0x00100073u, /* ebreak */
+  };
+  int steps;
+
+  rv32emu_default_options(&opts);
+  opts.hart_count = 2u;
+  assert(rv32emu_platform_init(&m, &opts));
+
+  pc0 = RV32EMU_DRAM_BASE + 0x300u;
+  pc1 = RV32EMU_DRAM_BASE + 0x700u;
+  shared_addr = RV32EMU_DRAM_BASE + 0x900u;
+  /*
+   * rv32emu uses a per-hart instruction slice scheduler (64 instructions).
+   * Put sc.w after 64 nops so hart1 can run its store in between hart0 lr.w
+   * and hart0 sc.w, making cross-hart reservation invalidation observable.
+   */
+  sc_pc = pc0 + 65u * 4u;
+
+  assert(rv32emu_phys_write(&m, pc0, 4, 0x1000a2afu)); /* lr.w x5, (x1) */
+  for (uint32_t i = 1u; i <= 64u; i++) {
+    assert(rv32emu_phys_write(&m, pc0 + i * 4u, 4, 0x00000013u)); /* nop */
+  }
+  assert(rv32emu_phys_write(&m, sc_pc, 4, 0x1820a32fu)); /* sc.w x6, x2, (x1) */
+  assert(rv32emu_phys_write(&m, sc_pc + 4u, 4, 0x00100073u)); /* ebreak */
+
+  for (uint32_t i = 0; i < (uint32_t)(sizeof(prog1) / sizeof(prog1[0])); i++) {
+    assert(rv32emu_phys_write(&m, pc1 + i * 4u, 4, prog1[i]));
+  }
+  assert(rv32emu_phys_write(&m, shared_addr, 4, 0u));
+
+  m.harts[0].pc = pc0;
+  m.harts[0].running = true;
+  m.harts[0].priv = RV32EMU_PRIV_M;
+  m.harts[0].x[1] = shared_addr;
+  m.harts[0].x[2] = 0xaaaa5555u;
+
+  m.harts[1].pc = pc1;
+  m.harts[1].running = true;
+  m.harts[1].priv = RV32EMU_PRIV_M;
+  m.harts[1].csr[CSR_MHARTID] = 1u;
+  m.harts[1].x[1] = shared_addr;
+  m.harts[1].x[3] = 0x12345678u;
+
+  steps = rv32emu_run(&m, 256);
+  assert(steps >= 67);
+  assert(m.harts[0].x[6] == 1u); /* sc.w must fail after hart1 store */
+  assert(rv32emu_phys_read(&m, shared_addr, 4, &value));
+  assert(value == 0x12345678u);
+
+  rv32emu_platform_destroy(&m);
+}
+
 int main(void) {
   test_base32();
   test_rvc_basic();
   test_multihart_round_robin();
+  test_multihart_lr_sc_invalidation();
   puts("[OK] rv32emu run test passed");
   return 0;
 }

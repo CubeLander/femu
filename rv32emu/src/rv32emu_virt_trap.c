@@ -5,6 +5,52 @@
 #define SATP_MODE_SV32 (1u << 31)
 #define SATP_PPN_MASK 0x003fffffu
 
+/*
+ * Reservation invalidation needs range overlap checks because stores may be
+ * 1/2/4-byte and may be unaligned (emulated as byte writes). We treat any
+ * overlap with a reserved 4-byte word as a conflict.
+ */
+static bool rv32emu_ranges_overlap(uint32_t addr_a, uint32_t len_a, uint32_t addr_b,
+                                   uint32_t len_b) {
+  uint64_t end_a;
+  uint64_t end_b;
+
+  if (len_a == 0u || len_b == 0u) {
+    return false;
+  }
+
+  end_a = (uint64_t)addr_a + (uint64_t)len_a;
+  end_b = (uint64_t)addr_b + (uint64_t)len_b;
+  return ((uint64_t)addr_a < end_b) && ((uint64_t)addr_b < end_a);
+}
+
+/*
+ * RISC-V LR/SC rule (architecturally simplified for this emulator):
+ * any successful store to the reserved word from any hart invalidates the
+ * reservation, so a later sc.w must fail.
+ *
+ * We track one reservation per hart (lr_addr/lr_valid) and clear all
+ * overlapping reservations after every committed store.
+ */
+static void rv32emu_invalidate_lr_reservations(rv32emu_machine_t *m, uint32_t vaddr, int len) {
+  uint32_t hartid;
+
+  if (m == NULL || len <= 0) {
+    return;
+  }
+
+  for (hartid = 0u; hartid < m->hart_count; hartid++) {
+    rv32emu_cpu_t *cpu = rv32emu_hart_cpu(m, hartid);
+
+    if (cpu == NULL || !cpu->lr_valid) {
+      continue;
+    }
+    if (rv32emu_ranges_overlap(vaddr, (uint32_t)len, cpu->lr_addr, 4u)) {
+      cpu->lr_valid = false;
+    }
+  }
+}
+
 static void rv32emu_raise_page_fault(rv32emu_machine_t *m, rv32emu_access_t access,
                                      uint32_t vaddr) {
   uint32_t cause = RV32EMU_EXC_LOAD_PAGE_FAULT;
@@ -278,6 +324,14 @@ bool rv32emu_virt_write(rv32emu_machine_t *m, uint32_t vaddr, int len,
     rv32emu_raise_access_fault(m, access, vaddr);
     return false;
   }
+
+  /*
+   * Store-side LR/SC invalidation hook:
+   * 1. only after the write is actually committed;
+   * 2. applies to normal stores, AMO stores and sc.w stores uniformly;
+   * 3. invalidates reservations on all harts for overlapping addresses.
+   */
+  rv32emu_invalidate_lr_reservations(m, vaddr, len);
 
   return true;
 }

@@ -706,15 +706,35 @@ static inline uint32_t rv32emu_cpu_x_off(uint32_t idx) {
 }
 
 static bool rv32emu_jit_insn_supported(const rv32emu_decoded_insn_t *d) {
+  const char *disable_alu_env;
+  const char *disable_mem_env;
+  const char *disable_cf_env;
+  bool allow_alu;
+  bool allow_mem;
+  bool allow_cf;
+
   if (d == NULL) {
     return false;
   }
 
+  disable_alu_env = getenv("RV32EMU_EXPERIMENTAL_JIT_DISABLE_ALU");
+  disable_mem_env = getenv("RV32EMU_EXPERIMENTAL_JIT_DISABLE_MEM");
+  disable_cf_env = getenv("RV32EMU_EXPERIMENTAL_JIT_DISABLE_CF");
+  allow_alu = !(disable_alu_env != NULL && disable_alu_env[0] == '1');
+  allow_mem = !(disable_mem_env != NULL && disable_mem_env[0] == '1');
+  allow_cf = !(disable_cf_env != NULL && disable_cf_env[0] == '1');
+
   switch (d->opcode) {
   case 0x37: /* lui */
   case 0x17: /* auipc */
+    if (!allow_alu) {
+      return false;
+    }
     return true;
   case 0x13: /* op-imm */
+    if (!allow_alu) {
+      return false;
+    }
     switch (d->funct3) {
     case 0x0: /* addi */
     case 0x1: /* slli */
@@ -730,6 +750,9 @@ static bool rv32emu_jit_insn_supported(const rv32emu_decoded_insn_t *d) {
       return false;
     }
   case 0x33: /* op */
+    if (!allow_alu) {
+      return false;
+    }
     if (d->funct7 == 0x01u) {
       return false; /* M-extension currently falls back to interpreter. */
     }
@@ -749,15 +772,30 @@ static bool rv32emu_jit_insn_supported(const rv32emu_decoded_insn_t *d) {
       return false;
     }
   case 0x03: /* load */
+    if (!allow_mem) {
+      return false;
+    }
     return d->funct3 == 0x0u || d->funct3 == 0x1u || d->funct3 == 0x2u || d->funct3 == 0x4u ||
            d->funct3 == 0x5u;
   case 0x23: /* store */
+    if (!allow_mem) {
+      return false;
+    }
     return d->funct3 == 0x0u || d->funct3 == 0x1u || d->funct3 == 0x2u;
   case 0x6f: /* jal */
+    if (!allow_cf) {
+      return false;
+    }
     return true;
   case 0x67: /* jalr */
+    if (!allow_cf) {
+      return false;
+    }
     return d->funct3 == 0x0u;
   case 0x63: /* branch */
+    if (!allow_cf) {
+      return false;
+    }
     return d->funct3 == 0x0u || d->funct3 == 0x1u || d->funct3 == 0x4u || d->funct3 == 0x5u ||
            d->funct3 == 0x6u || d->funct3 == 0x7u;
   default:
@@ -1129,10 +1167,6 @@ static bool rv32emu_tb_build_line(rv32emu_machine_t *m, rv32emu_tb_line_t *line,
     }
   }
 
-  if (line->count == 0u) {
-    return false;
-  }
-
   line->valid = true;
   return true;
 }
@@ -1280,6 +1314,8 @@ rv32emu_tb_jit_result_t rv32emu_exec_tb_jit(rv32emu_machine_t *m, rv32emu_tb_cac
   uint64_t local_budget;
   int retired;
   bool handled;
+  bool running_now;
+  bool pc_changed;
 
   if (m == NULL || cache == NULL || budget == 0u) {
     return result;
@@ -1307,6 +1343,8 @@ rv32emu_tb_jit_result_t rv32emu_exec_tb_jit(rv32emu_machine_t *m, rv32emu_tb_cac
 
   retired = line->jit_fn(m, cpu);
   handled = g_rv32emu_jit_tls_handled;
+  running_now = atomic_load_explicit(&cpu->running, memory_order_acquire);
+  pc_changed = (cpu->pc != pc);
 
   g_rv32emu_jit_tls_cache = NULL;
   g_rv32emu_jit_tls_budget = 0u;
@@ -1315,9 +1353,14 @@ rv32emu_tb_jit_result_t rv32emu_exec_tb_jit(rv32emu_machine_t *m, rv32emu_tb_cac
 
   cache->active = false;
   if (retired <= 0) {
-    if (handled || cpu->pc != pc ||
-        !atomic_load_explicit(&cpu->running, memory_order_acquire)) {
+    /*
+     * Avoid spinning forever on handled-no-retire when PC did not move.
+     * In that case force caller fallback to interpreter for forward progress.
+     */
+    if (pc_changed || !running_now) {
       result.status = RV32EMU_TB_JIT_HANDLED_NO_RETIRE;
+    } else if (handled) {
+      result.status = RV32EMU_TB_JIT_NOPROGRESS;
     }
     return result;
   }
@@ -1335,6 +1378,114 @@ rv32emu_tb_jit_result_t rv32emu_exec_tb_jit(rv32emu_machine_t *m, rv32emu_tb_cac
   (void)budget;
   return result;
 #endif
+}
+
+rv32emu_tb_block_result_t rv32emu_exec_tb_block(rv32emu_machine_t *m, rv32emu_tb_cache_t *cache,
+                                                 uint64_t budget) {
+  rv32emu_tb_block_result_t result = {RV32EMU_TB_BLOCK_NOPROGRESS, 0u};
+  rv32emu_cpu_t *cpu;
+  uint32_t first_pc;
+
+  if (m == NULL || cache == NULL || budget == 0u) {
+    return result;
+  }
+
+  cpu = RV32EMU_CPU(m);
+  if (cpu == NULL) {
+    return result;
+  }
+
+  first_pc = cpu->pc;
+
+  while (result.retired < budget) {
+    rv32emu_tb_line_t *line = NULL;
+    uint32_t pc;
+    uint8_t index = 0u;
+
+    if (!atomic_load_explicit(&cpu->running, memory_order_acquire)) {
+      if (result.retired == 0u) {
+        result.status = RV32EMU_TB_BLOCK_HANDLED_NO_RETIRE;
+      } else {
+        result.status = RV32EMU_TB_BLOCK_RETIRED;
+      }
+      return result;
+    }
+
+    if (rv32emu_check_pending_interrupt(m)) {
+      if (result.retired == 0u && (cpu->pc != first_pc ||
+                                   !atomic_load_explicit(&cpu->running, memory_order_acquire))) {
+        result.status = RV32EMU_TB_BLOCK_HANDLED_NO_RETIRE;
+      } else if (result.retired != 0u) {
+        result.status = RV32EMU_TB_BLOCK_RETIRED;
+      }
+      return result;
+    }
+
+    pc = cpu->pc;
+    if (cache->active) {
+      rv32emu_tb_line_t *active = rv32emu_tb_lookup_or_build(m, cache, cache->active_start_pc);
+      if (active != NULL && cache->active_index < active->count &&
+          active->pcs[cache->active_index] == pc) {
+        line = active;
+        index = cache->active_index;
+      } else {
+        cache->active = false;
+      }
+    }
+
+    if (line == NULL) {
+      line = rv32emu_tb_lookup_or_build(m, cache, pc);
+      if (line == NULL || line->count == 0u || line->pcs[0] != pc) {
+        cache->active = false;
+        if (result.retired != 0u) {
+          result.status = RV32EMU_TB_BLOCK_RETIRED;
+        }
+        return result;
+      }
+      cache->active = true;
+      cache->active_start_pc = line->start_pc;
+      cache->active_index = 0u;
+      index = 0u;
+    }
+
+    while (index < line->count && result.retired < budget) {
+      if (cpu->pc != line->pcs[index]) {
+        cache->active = false;
+        if (result.retired != 0u) {
+          result.status = RV32EMU_TB_BLOCK_RETIRED;
+        }
+        return result;
+      }
+
+      if (!rv32emu_exec_decoded(m, &line->decoded[index])) {
+        cache->active = false;
+        if (result.retired != 0u) {
+          result.status = RV32EMU_TB_BLOCK_RETIRED;
+        } else if (cpu->pc != first_pc ||
+                   !atomic_load_explicit(&cpu->running, memory_order_acquire)) {
+          result.status = RV32EMU_TB_BLOCK_HANDLED_NO_RETIRE;
+        }
+        return result;
+      }
+      result.retired++;
+
+      if (index + 1u < line->count && cpu->pc == line->pcs[index + 1u]) {
+        cache->active = true;
+        cache->active_start_pc = line->start_pc;
+        cache->active_index = (uint8_t)(index + 1u);
+        index++;
+        continue;
+      }
+
+      cache->active = false;
+      break;
+    }
+  }
+
+  if (result.retired != 0u) {
+    result.status = RV32EMU_TB_BLOCK_RETIRED;
+  }
+  return result;
 }
 
 bool rv32emu_exec_one_tb(rv32emu_machine_t *m, rv32emu_tb_cache_t *cache) {

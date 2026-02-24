@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SOURCES_DIR="${SOURCES_DIR:-${ROOT_DIR}/out/sources}"
 
 FETCH_LINUX="${FETCH_LINUX:-1}"
 FETCH_OPENSBI="${FETCH_OPENSBI:-1}"
@@ -13,19 +14,19 @@ SHALLOW_CLONE="${SHALLOW_CLONE:-1}"
 
 LINUX_REPO="${LINUX_REPO:-https://github.com/torvalds/linux.git}"
 LINUX_REF="${LINUX_REF:-v6.6}"
-LINUX_DIR="${LINUX_DIR:-${ROOT_DIR}/linux}"
+LINUX_DIR="${LINUX_DIR:-${SOURCES_DIR}/linux}"
 
 OPENSBI_REPO="${OPENSBI_REPO:-https://github.com/riscv-software-src/opensbi.git}"
 OPENSBI_REF="${OPENSBI_REF:-v1.5.1}"
-OPENSBI_DIR="${OPENSBI_DIR:-${ROOT_DIR}/opensbi}"
+OPENSBI_DIR="${OPENSBI_DIR:-${SOURCES_DIR}/opensbi}"
 
 BUSYBOX_REPO="${BUSYBOX_REPO:-https://github.com/mirror/busybox.git}"
 BUSYBOX_REF="${BUSYBOX_REF:-1_36_1}"
-BUSYBOX_DIR="${BUSYBOX_DIR:-${ROOT_DIR}/busybox}"
+BUSYBOX_DIR="${BUSYBOX_DIR:-${SOURCES_DIR}/busybox}"
 
 TOOLCHAIN_REPO="${TOOLCHAIN_REPO:-https://github.com/riscv-collab/riscv-gnu-toolchain.git}"
 TOOLCHAIN_REF="${TOOLCHAIN_REF:-master}"
-TOOLCHAIN_DIR="${TOOLCHAIN_DIR:-${ROOT_DIR}/riscv-gnu-toolchain}"
+TOOLCHAIN_DIR="${TOOLCHAIN_DIR:-${SOURCES_DIR}/riscv-gnu-toolchain}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -101,6 +102,7 @@ sync_repo() {
 }
 
 require_cmd git
+mkdir -p "${SOURCES_DIR}"
 
 if [[ "${FETCH_LINUX}" == "1" ]]; then
   sync_repo "linux" "${LINUX_REPO}" "${LINUX_DIR}" "${LINUX_REF}"

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LINUX_SRC="${ROOT_DIR}/linux"
+LINUX_SRC="${LINUX_SRC:-${ROOT_DIR}/out/sources/linux}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/out/linux}"
 JOBS="${JOBS:-$(nproc)}"
 ARCH_NAME="${ARCH_NAME:-riscv}"
@@ -39,6 +39,7 @@ detect_cross_prefix() {
 
 if [[ ! -d "${LINUX_SRC}" ]]; then
   echo "[ERR] linux source not found: ${LINUX_SRC}" >&2
+  echo "      run ./scripts/fetch-sources.sh first or set LINUX_SRC." >&2
   exit 1
 fi
 

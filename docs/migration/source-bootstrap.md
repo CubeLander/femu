@@ -15,6 +15,13 @@ From repo root:
 ./scripts/fetch-sources.sh
 ```
 
+Default checkout directory for external sources:
+
+1. `out/sources/linux`
+2. `out/sources/opensbi`
+3. `out/sources/busybox`
+4. `out/sources/riscv-gnu-toolchain` (when `FETCH_TOOLCHAIN=1`)
+
 Default pinned refs:
 
 1. Linux: `v6.6`

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OPENSBI_SRC="${ROOT_DIR}/opensbi"
+OPENSBI_SRC="${OPENSBI_SRC:-${ROOT_DIR}/out/sources/opensbi}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/out/opensbi}"
 JOBS="${JOBS:-$(nproc)}"
 CROSS_PREFIX="${CROSS_COMPILE:-}"
@@ -29,6 +29,7 @@ detect_cross_prefix() {
 
 if [[ ! -d "${OPENSBI_SRC}" ]]; then
   echo "[ERR] opensbi source not found: ${OPENSBI_SRC}" >&2
+  echo "      run ./scripts/fetch-sources.sh first or set OPENSBI_SRC." >&2
   exit 1
 fi
 

@@ -20,6 +20,17 @@ typedef struct {
   uint32_t retired;
 } rv32emu_tb_jit_result_t;
 
+typedef enum {
+  RV32EMU_TB_BLOCK_NOPROGRESS = 0,
+  RV32EMU_TB_BLOCK_RETIRED = 1,
+  RV32EMU_TB_BLOCK_HANDLED_NO_RETIRE = 2,
+} rv32emu_tb_block_status_t;
+
+typedef struct {
+  rv32emu_tb_block_status_t status;
+  uint32_t retired;
+} rv32emu_tb_block_result_t;
+
 typedef struct {
   bool valid;
   uint32_t start_pc;
@@ -49,6 +60,8 @@ typedef struct {
 
 void rv32emu_tb_cache_reset(rv32emu_tb_cache_t *cache);
 bool rv32emu_exec_one_tb(rv32emu_machine_t *m, rv32emu_tb_cache_t *cache);
+rv32emu_tb_block_result_t rv32emu_exec_tb_block(rv32emu_machine_t *m, rv32emu_tb_cache_t *cache,
+                                                 uint64_t budget);
 rv32emu_tb_jit_result_t rv32emu_exec_tb_jit(rv32emu_machine_t *m, rv32emu_tb_cache_t *cache,
                                             uint64_t budget);
 

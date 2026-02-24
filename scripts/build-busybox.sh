@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUSYBOX_SRC="${BUSYBOX_SRC:-${ROOT_DIR}/busybox}"
+BUSYBOX_SRC="${BUSYBOX_SRC:-${ROOT_DIR}/out/sources/busybox}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/out/busybox}"
 JOBS="${JOBS:-$(nproc)}"
 ARCH_NAME="${ARCH_NAME:-riscv}"

@@ -11,7 +11,7 @@ if [[ -n "${BUSYBOX_BIN:-}" ]]; then
 elif [[ -x "${ROOT_DIR}/out/busybox/busybox" ]]; then
   BUSYBOX_BIN="${ROOT_DIR}/out/busybox/busybox"
 else
-  BUSYBOX_BIN="${ROOT_DIR}/busybox/busybox"
+  BUSYBOX_BIN=""
 fi
 
 if [[ ! -x "${BUSYBOX_BIN}" ]]; then

@@ -69,6 +69,9 @@ Execution fast-path controls:
 1. `RV32EMU_EXPERIMENTAL_TB=1`: enable decoded-TB stepping.
 2. `RV32EMU_EXPERIMENTAL_JIT=1`: enable x86_64 machine-code JIT attempt.
 3. `RV32EMU_EXPERIMENTAL_JIT_HOT=<N>`: compile a TB line only after it is seen `N` times (default `3`).
+4. `RV32EMU_EXPERIMENTAL_JIT_SKIP_MMODE=1`: do not attempt JIT while hart is in M-mode.
+5. `RV32EMU_EXPERIMENTAL_JIT_GUARD=1`: enable conservative no-progress cooldown/fallback guard in run loop.
+6. `RV32EMU_EXPERIMENTAL_JIT_DISABLE_ALU=1|..._MEM=1|..._CF=1`: selectively disable JIT opcode classes for triage.
 
 JIT is currently a prefix JIT:
 
@@ -80,6 +83,6 @@ JIT is currently a prefix JIT:
 ## 7. Known CPU-Level Gaps
 
 1. TB currently does not cache compressed instruction streams.
-2. JIT currently covers integer ALU subset only (no load/store/system/privileged codegen).
+2. JIT native coverage is still partial and may require class-level gating for Linux boot stability.
 3. Chaining still relies on C helper checks at block boundaries (interrupt/budget/cache), not fully inlined machine-code guards.
 4. Coverage/perf instrumentation for TB/JIT hit rate is not yet present.

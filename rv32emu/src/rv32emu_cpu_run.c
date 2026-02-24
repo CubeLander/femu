@@ -7,14 +7,58 @@
 
 #define RV32EMU_HART_SLICE_INSTR 64u
 #define RV32EMU_WORKER_COMMIT_BATCH 256u
+#define RV32EMU_JIT_NO_RETIRE_FALLBACK_THRESHOLD 64u
+#define RV32EMU_INTERP_BURST_MAX 32u
+#define RV32EMU_JIT_NOPROGRESS_COOLDOWN 1024u
 
 bool rv32emu_exec_one(rv32emu_machine_t *m);
 
+static uint32_t rv32emu_exec_interp_burst(rv32emu_machine_t *m, uint64_t budget) {
+  uint32_t retired = 0u;
+  uint32_t idle_spins = 0u;
+  uint32_t max_steps;
+
+  if (m == NULL || budget == 0u) {
+    return 0u;
+  }
+
+  max_steps = (budget > RV32EMU_INTERP_BURST_MAX) ? RV32EMU_INTERP_BURST_MAX : (uint32_t)budget;
+  while (retired < max_steps && atomic_load_explicit(&RV32EMU_CPU(m)->running, memory_order_acquire)) {
+    uint32_t pc_before = RV32EMU_CPU(m)->pc;
+
+    if (rv32emu_check_pending_interrupt(m)) {
+      if (!atomic_load_explicit(&RV32EMU_CPU(m)->running, memory_order_acquire)) {
+        break;
+      }
+      if (RV32EMU_CPU(m)->pc == pc_before) {
+        idle_spins++;
+        if (idle_spins >= 4u) {
+          break;
+        }
+      } else {
+        idle_spins = 0u;
+      }
+      continue;
+    }
+
+    if (!rv32emu_exec_one(m)) {
+      break;
+    }
+
+    retired++;
+    idle_spins = 0u;
+  }
+
+  return retired;
+}
+
 static int rv32emu_run_single_thread(rv32emu_machine_t *m, uint64_t max_instructions, bool use_tb,
-                                     bool use_jit) {
+                                     bool use_jit, bool jit_skip_mmode, bool jit_guard) {
   uint64_t executed = 0;
   uint32_t next_hart = 0;
   rv32emu_tb_cache_t tb_cache[RV32EMU_MAX_HARTS];
+  uint32_t jit_no_retire_streak[RV32EMU_MAX_HARTS] = {0u};
+  uint32_t jit_cooldown[RV32EMU_MAX_HARTS] = {0u};
 
   for (uint32_t hart = 0u; hart < RV32EMU_MAX_HARTS; hart++) {
     rv32emu_tb_cache_reset(&tb_cache[hart]);
@@ -39,6 +83,7 @@ static int rv32emu_run_single_thread(rv32emu_machine_t *m, uint64_t max_instruct
            atomic_load_explicit(&RV32EMU_CPU(m)->running, memory_order_acquire);) {
         uint32_t steps = 0u;
         bool jit_handled = false;
+        bool jit_allowed = false;
 
         if (rv32emu_check_pending_interrupt(m)) {
           if (!atomic_load_explicit(&RV32EMU_CPU(m)->running, memory_order_acquire)) {
@@ -48,29 +93,74 @@ static int rv32emu_run_single_thread(rv32emu_machine_t *m, uint64_t max_instruct
           continue;
         }
 
-        if (use_jit) {
+        jit_allowed = use_jit &&
+                      (!jit_skip_mmode || RV32EMU_CPU(m)->priv != RV32EMU_PRIV_M);
+        if (jit_guard && jit_allowed && jit_cooldown[hart] != 0u) {
+          jit_cooldown[hart]--;
+        }
+        if (jit_allowed && (!jit_guard || jit_cooldown[hart] == 0u)) {
+          uint32_t jit_entry_pc = RV32EMU_CPU(m)->pc;
           rv32emu_tb_jit_result_t jit_result =
               rv32emu_exec_tb_jit(m, &tb_cache[hart], max_instructions - executed);
           if (jit_result.status == RV32EMU_TB_JIT_RETIRED && jit_result.retired > 0u) {
             steps = jit_result.retired;
+            if (jit_guard) {
+              jit_no_retire_streak[hart] = 0u;
+              jit_cooldown[hart] = 0u;
+            }
           } else if (jit_result.status == RV32EMU_TB_JIT_HANDLED_NO_RETIRE) {
-            jit_handled = true;
+            if (jit_guard) {
+              if (RV32EMU_CPU(m)->pc == jit_entry_pc) {
+                if (jit_no_retire_streak[hart] < UINT32_MAX) {
+                  jit_no_retire_streak[hart]++;
+                }
+              } else {
+                jit_no_retire_streak[hart] = 1u;
+              }
+              if (jit_no_retire_streak[hart] >= RV32EMU_JIT_NO_RETIRE_FALLBACK_THRESHOLD &&
+                  atomic_load_explicit(&RV32EMU_CPU(m)->running, memory_order_acquire) &&
+                  rv32emu_exec_one(m)) {
+                steps = 1u;
+                jit_no_retire_streak[hart] = 0u;
+              } else {
+                jit_handled = true;
+              }
+              if (jit_cooldown[hart] < RV32EMU_JIT_NOPROGRESS_COOLDOWN) {
+                jit_cooldown[hart]++;
+              }
+            } else {
+              jit_handled = true;
+            }
+          } else {
+            if (jit_guard) {
+              jit_no_retire_streak[hart] = 0u;
+              jit_cooldown[hart] = RV32EMU_JIT_NOPROGRESS_COOLDOWN;
+            }
           }
         }
 
         if (steps == 0u) {
           if (!jit_handled) {
-            bool ok = false;
             if (use_tb) {
-              ok = rv32emu_exec_one_tb(m, &tb_cache[hart]);
-              if (!ok && atomic_load_explicit(&RV32EMU_CPU(m)->running, memory_order_acquire)) {
-                ok = rv32emu_exec_one(m);
+              uint64_t tb_budget = max_instructions - executed;
+              uint64_t slice_budget = RV32EMU_HART_SLICE_INSTR - slice;
+              rv32emu_tb_block_result_t tb_result;
+
+              if (tb_budget > slice_budget) {
+                tb_budget = slice_budget;
+              }
+              tb_result = rv32emu_exec_tb_block(m, &tb_cache[hart], tb_budget);
+              if (tb_result.status == RV32EMU_TB_BLOCK_RETIRED && tb_result.retired > 0u) {
+                steps = tb_result.retired;
+              } else if (tb_result.status == RV32EMU_TB_BLOCK_HANDLED_NO_RETIRE) {
+                jit_handled = true;
+              } else if (atomic_load_explicit(&RV32EMU_CPU(m)->running, memory_order_acquire)) {
+                steps = rv32emu_exec_interp_burst(m, tb_budget);
               }
             } else {
-              ok = rv32emu_exec_one(m);
-            }
-            if (ok) {
-              steps = 1u;
+              if (rv32emu_exec_one(m)) {
+                steps = 1u;
+              }
             }
           } else {
             slice += 1u;
@@ -118,6 +208,8 @@ typedef struct {
   uint32_t hartid;
   bool use_tb;
   bool use_jit;
+  bool jit_skip_mmode;
+  bool jit_guard;
 } rv32emu_worker_ctx_t;
 
 static bool rv32emu_worker_commit_executed(rv32emu_thread_state_t *state, uint64_t *local_executed,
@@ -143,6 +235,8 @@ static void *rv32emu_run_worker(void *opaque) {
   rv32emu_thread_state_t *state = ctx->state;
   rv32emu_cpu_t *cpu = rv32emu_hart_cpu(ctx->m, ctx->hartid);
   uint64_t local_executed = 0u;
+  uint32_t jit_no_retire_streak = 0u;
+  uint32_t jit_cooldown = 0u;
   rv32emu_tb_cache_t tb_cache;
 
   if (cpu == NULL) {
@@ -180,29 +274,67 @@ static void *rv32emu_run_worker(void *opaque) {
     {
       uint32_t steps = 0u;
       bool jit_handled = false;
-      if (ctx->use_jit) {
-        uint64_t budget = ctx->max_instructions - (global_executed + local_executed);
+      uint64_t budget = ctx->max_instructions - (global_executed + local_executed);
+      bool jit_allowed = ctx->use_jit &&
+                         (!ctx->jit_skip_mmode || cpu->priv != RV32EMU_PRIV_M);
+      if (ctx->jit_guard && jit_allowed && jit_cooldown != 0u) {
+        jit_cooldown--;
+      }
+      if (jit_allowed && (!ctx->jit_guard || jit_cooldown == 0u)) {
+        uint32_t jit_entry_pc = cpu->pc;
         rv32emu_tb_jit_result_t jit_result = rv32emu_exec_tb_jit(ctx->m, &tb_cache, budget);
         if (jit_result.status == RV32EMU_TB_JIT_RETIRED && jit_result.retired > 0u) {
           steps = jit_result.retired;
+          if (ctx->jit_guard) {
+            jit_no_retire_streak = 0u;
+            jit_cooldown = 0u;
+          }
         } else if (jit_result.status == RV32EMU_TB_JIT_HANDLED_NO_RETIRE) {
-          jit_handled = true;
+          if (ctx->jit_guard) {
+            if (cpu->pc == jit_entry_pc) {
+              if (jit_no_retire_streak < UINT32_MAX) {
+                jit_no_retire_streak++;
+              }
+            } else {
+              jit_no_retire_streak = 1u;
+            }
+            if (jit_no_retire_streak >= RV32EMU_JIT_NO_RETIRE_FALLBACK_THRESHOLD &&
+                atomic_load_explicit(&cpu->running, memory_order_acquire) &&
+                rv32emu_exec_one(ctx->m)) {
+              steps = 1u;
+              jit_no_retire_streak = 0u;
+            } else {
+              jit_handled = true;
+            }
+            if (jit_cooldown < RV32EMU_JIT_NOPROGRESS_COOLDOWN) {
+              jit_cooldown++;
+            }
+          } else {
+            jit_handled = true;
+          }
+        } else {
+          if (ctx->jit_guard) {
+            jit_no_retire_streak = 0u;
+            jit_cooldown = RV32EMU_JIT_NOPROGRESS_COOLDOWN;
+          }
         }
       }
 
       if (steps == 0u) {
         if (!jit_handled) {
-          bool ok = false;
           if (ctx->use_tb) {
-            ok = rv32emu_exec_one_tb(ctx->m, &tb_cache);
-            if (!ok && atomic_load_explicit(&cpu->running, memory_order_acquire)) {
-              ok = rv32emu_exec_one(ctx->m);
+            rv32emu_tb_block_result_t tb_result = rv32emu_exec_tb_block(ctx->m, &tb_cache, budget);
+            if (tb_result.status == RV32EMU_TB_BLOCK_RETIRED && tb_result.retired > 0u) {
+              steps = tb_result.retired;
+            } else if (tb_result.status == RV32EMU_TB_BLOCK_HANDLED_NO_RETIRE) {
+              jit_handled = true;
+            } else if (atomic_load_explicit(&cpu->running, memory_order_acquire)) {
+              steps = rv32emu_exec_interp_burst(ctx->m, budget);
             }
           } else {
-            ok = rv32emu_exec_one(ctx->m);
-          }
-          if (ok) {
-            steps = 1u;
+            if (rv32emu_exec_one(ctx->m)) {
+              steps = 1u;
+            }
           }
         } else {
           continue;
@@ -231,7 +363,7 @@ static void *rv32emu_run_worker(void *opaque) {
 }
 
 static int rv32emu_run_threaded(rv32emu_machine_t *m, uint64_t max_instructions, bool use_tb,
-                                bool use_jit) {
+                                bool use_jit, bool jit_skip_mmode, bool jit_guard) {
   pthread_t threads[RV32EMU_MAX_HARTS];
   rv32emu_worker_ctx_t workers[RV32EMU_MAX_HARTS];
   rv32emu_thread_state_t state;
@@ -254,6 +386,8 @@ static int rv32emu_run_threaded(rv32emu_machine_t *m, uint64_t max_instructions,
     workers[hart].hartid = hart;
     workers[hart].use_tb = use_tb;
     workers[hart].use_jit = use_jit;
+    workers[hart].jit_skip_mmode = jit_skip_mmode;
+    workers[hart].jit_guard = jit_guard;
 
     if (pthread_create(&threads[hart], NULL, rv32emu_run_worker, &workers[hart]) != 0) {
       create_failed = true;
@@ -274,7 +408,8 @@ static int rv32emu_run_threaded(rv32emu_machine_t *m, uint64_t max_instructions,
   executed_total = atomic_load_explicit(&state.executed, memory_order_relaxed);
 
   if (create_failed && executed_total < max_instructions && rv32emu_any_hart_running(m)) {
-    int tail = rv32emu_run_single_thread(m, max_instructions - executed_total, use_tb, use_jit);
+    int tail = rv32emu_run_single_thread(m, max_instructions - executed_total, use_tb, use_jit,
+                                         jit_skip_mmode, jit_guard);
     if (tail < 0) {
       return -1;
     }
@@ -289,8 +424,12 @@ int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
   const char *threaded_env;
   const char *tb_env;
   const char *jit_env;
+  const char *jit_skip_mmode_env;
+  const char *jit_guard_env;
   bool use_tb;
   bool use_jit;
+  bool jit_skip_mmode;
+  bool jit_guard;
 
   if (m == NULL) {
     return -1;
@@ -307,15 +446,21 @@ int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
   use_tb = (tb_env != NULL && tb_env[0] == '1');
   jit_env = getenv("RV32EMU_EXPERIMENTAL_JIT");
   use_jit = (jit_env != NULL && jit_env[0] == '1');
+  jit_skip_mmode_env = getenv("RV32EMU_EXPERIMENTAL_JIT_SKIP_MMODE");
+  jit_skip_mmode = (jit_skip_mmode_env != NULL && jit_skip_mmode_env[0] == '1');
+  jit_guard_env = getenv("RV32EMU_EXPERIMENTAL_JIT_GUARD");
+  jit_guard = (jit_guard_env != NULL && jit_guard_env[0] == '1');
 
   if (m->hart_count == 1u) {
-    return rv32emu_run_single_thread(m, max_instructions, use_tb, use_jit);
+    return rv32emu_run_single_thread(m, max_instructions, use_tb, use_jit, jit_skip_mmode,
+                                     jit_guard);
   }
 
   threaded_env = getenv("RV32EMU_EXPERIMENTAL_HART_THREADS");
   if (threaded_env == NULL || threaded_env[0] != '1') {
-    return rv32emu_run_single_thread(m, max_instructions, use_tb, use_jit);
+    return rv32emu_run_single_thread(m, max_instructions, use_tb, use_jit, jit_skip_mmode,
+                                     jit_guard);
   }
 
-  return rv32emu_run_threaded(m, max_instructions, use_tb, use_jit);
+  return rv32emu_run_threaded(m, max_instructions, use_tb, use_jit, jit_skip_mmode, jit_guard);
 }

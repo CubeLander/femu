@@ -1,5 +1,7 @@
 -include nemu/Makefile.git
 
+RV32EMU_PERF_CFLAGS ?= -std=c11 -Wall -Wextra -Werror -O3 -march=native
+
 default:
 	@echo "Please run 'make' under any subprojects to compile."
  
@@ -75,8 +77,17 @@ rv32emu-test:
 rv32emu-bin:
 	$(MAKE) -C rv32emu rv32emu
 
+rv32emu-bin-perf:
+	$(MAKE) -C rv32emu clean rv32emu CFLAGS='$(RV32EMU_PERF_CFLAGS)'
+
 smoke-emulator: rv32emu-bin build-linux build-opensbi build-busybox-rv32 build-rootfs
 	./scripts/smoke-emulator.sh
+
+smoke-emulator-perf: rv32emu-bin-perf build-linux build-opensbi build-busybox-rv32 build-rootfs
+	./scripts/smoke-emulator.sh
+
+smoke-emulator-tb-perf: rv32emu-bin-perf build-linux build-opensbi build-busybox-rv32 build-rootfs
+	RV32EMU_EXPERIMENTAL_TB=1 ./scripts/smoke-emulator.sh
 
 smoke-emulator-strict: rv32emu-bin build-linux build-opensbi build-busybox-rv32 build-rootfs
 	ALLOW_INIT_PANIC=0 ./scripts/smoke-emulator.sh
@@ -117,4 +128,4 @@ bootstrap: build-toolchain fetch-sources build-busybox build-linux build-opensbi
 build-all: build-busybox build-linux build-opensbi build-rootfs
 	@echo "[OK] all build artifacts are ready under out/"
 
-.PHONY: default clean submit info setup password dev-shell fetch-sources build-toolchain install-rv32-toolchain build-busybox build-busybox-rv32 build-linux build-linux-smp build-opensbi build-rootfs smoke-qemu smoke-qemu-strict dump-dtb takeaway check-env check-boot-contract rv32emu-test rv32emu-bin smoke-emulator smoke-emulator-strict smoke-emulator-interactive smoke-emulator-smp smoke-emulator-smp-linux smoke-emulator-smp-threaded smoke-emulator-smp-linux-threaded bootstrap build-all
+.PHONY: default clean submit info setup password dev-shell fetch-sources build-toolchain install-rv32-toolchain build-busybox build-busybox-rv32 build-linux build-linux-smp build-opensbi build-rootfs smoke-qemu smoke-qemu-strict dump-dtb takeaway check-env check-boot-contract rv32emu-test rv32emu-bin rv32emu-bin-perf smoke-emulator smoke-emulator-perf smoke-emulator-tb-perf smoke-emulator-strict smoke-emulator-interactive smoke-emulator-smp smoke-emulator-smp-linux smoke-emulator-smp-threaded smoke-emulator-smp-linux-threaded bootstrap build-all

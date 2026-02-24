@@ -22,6 +22,9 @@
 !/.vscode/
 !/.vscode/**
 /out/
+/linux/
+/opensbi/
+/busybox/
 .cache/
 # rv32emu local build artifacts
 rv32emu/build/

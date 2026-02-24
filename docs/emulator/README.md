@@ -18,7 +18,10 @@ Quick checks:
 - `make check-boot-contract`
 - `make rv32emu-test`
 - `make rv32emu-bin`
+- `make rv32emu-bin-perf`
 - `make smoke-emulator`
+- `make smoke-emulator-perf`
+- `make smoke-emulator-tb-perf`
 - `make smoke-emulator-strict`
 - `make build-linux-smp`
 - `make smoke-emulator-smp`

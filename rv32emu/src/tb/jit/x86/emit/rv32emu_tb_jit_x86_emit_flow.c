@@ -1,7 +1,7 @@
 #include "../../../../internal/tb_jit_internal.h"
 
 #if defined(__x86_64__)
-#include "rv32emu_tb_jit_x86_emit_primitives_base_impl.h"
+#include "rv32emu_tb_jit_x86_emit_primitives.h"
 
 rv32emu_tb_jit_fn_t rv32emu_jit_chain_next(rv32emu_machine_t *m, rv32emu_cpu_t *cpu,
                                            rv32emu_tb_line_t *from);

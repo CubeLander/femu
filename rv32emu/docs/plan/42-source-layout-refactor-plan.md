@@ -244,3 +244,60 @@ As of 2026-02-24:
    - validation remains baseline-equivalent:
      - `make -C rv32emu rv32emu` passes
      - `make -C rv32emu test` remains at the same known failure in `tests/test_run.c:504`
+17. x86 emit primitives are now a normal module (no include-time implementation headers):
+   - added:
+     - `src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_primitives.h`
+     - `src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_primitives.c`
+   - updated consumers:
+     - `src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_flow.c`
+     - `src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_lowering.c`
+   - removed:
+     - `src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_primitives_base_impl.h`
+     - `src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_primitives_alu_impl.h`
+     - `src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_primitives_helper_impl.h`
+     - `src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_primitives_impl.h`
+   - source tree now has no remaining `.inc` or `*_impl.h` files under `src/`
+   - validation remains baseline-equivalent:
+     - `make -C rv32emu rv32emu` passes
+     - `make -C rv32emu test` remains at the same known failure in `tests/test_run.c:504`
+18. TB JIT config/env helpers were extracted from `rv32emu_tb.c` into a dedicated module:
+   - added:
+     - `src/tb/rv32emu_tb_jit_config.c`
+   - internal interfaces added to:
+     - `src/internal/tb_internal.h`
+   - moved out from `rv32emu_tb.c`:
+     - env parsers (`rv32emu_tb_env_bool`, `rv32emu_tb_u32_from_env`)
+     - JIT config readers (`*_from_env`)
+     - JIT generation seed helper (`rv32emu_tb_next_jit_generation`)
+   - size effect:
+     - `src/tb/rv32emu_tb.c` reduced to ~1368 LOC
+   - validation remains baseline-equivalent:
+     - `make -C rv32emu rv32emu` passes
+     - `make -C rv32emu test` remains at the same known failure in `tests/test_run.c:504`
+19. TB JIT stats subsystem was extracted from `rv32emu_tb.c` into a dedicated module:
+   - added:
+     - `src/tb/rv32emu_tb_jit_stats.c`
+   - internal contract moved to shared private header:
+     - `src/internal/tb_internal.h` now owns `rv32emu_jit_stats_t`, stats globals, and stats macros
+   - moved out from `rv32emu_tb.c`:
+     - stats storage + enable gate (`g_rv32emu_jit_stats`, `g_rv32emu_jit_stats_mode`, `rv32emu_jit_stats_enabled`)
+     - stats APIs (`rv32emu_jit_stats_inc_event`, `rv32emu_jit_stats_add_compile_prefix_insns`,
+       `rv32emu_jit_stats_inc_helper_mem_calls`, `rv32emu_jit_stats_inc_helper_cf_calls`,
+       `rv32emu_jit_stats_reset`, `rv32emu_jit_stats_dump`)
+   - size effect:
+     - `src/tb/rv32emu_tb.c` reduced further to ~906 LOC
+   - validation remains baseline-equivalent:
+     - `make -C rv32emu rv32emu` passes
+     - `make -C rv32emu test` remains at the same known failure in `tests/test_run.c:504`
+20. x86 JIT/TB bridge wrappers were extracted from `rv32emu_tb.c`:
+   - added:
+     - `src/tb/rv32emu_tb_jit_x86_bridge.c`
+   - moved out from `rv32emu_tb.c`:
+     - x86-facing bridge/public wrapper APIs (`*_public`, async env bridge, pool/gen bridge)
+   - internal cache lookup API formalized for bridge usage:
+     - `rv32emu_tb_find_cached_line` is now declared in `src/internal/tb_internal.h`
+   - size effect:
+     - `src/tb/rv32emu_tb.c` reduced further to ~811 LOC
+   - validation remains baseline-equivalent:
+     - `make -C rv32emu rv32emu` passes
+     - `make -C rv32emu test` remains at the same known failure in `tests/test_run.c:504`

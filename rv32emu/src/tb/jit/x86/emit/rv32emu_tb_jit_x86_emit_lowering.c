@@ -2,9 +2,7 @@
 
 #if defined(__x86_64__)
 #include <stdlib.h>
-#include "rv32emu_tb_jit_x86_emit_primitives_base_impl.h"
-#include "rv32emu_tb_jit_x86_emit_primitives_alu_impl.h"
-#include "rv32emu_tb_jit_x86_emit_primitives_helper_impl.h"
+#include "rv32emu_tb_jit_x86_emit_primitives.h"
 
 static bool rv32emu_jit_insn_supported(const rv32emu_decoded_insn_t *d) {
   const char *disable_alu_env;

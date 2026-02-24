@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #if defined(__x86_64__)
 #include <pthread.h>
@@ -19,6 +20,26 @@ bool rv32emu_exec_decoded(rv32emu_machine_t *m, const rv32emu_decoded_insn_t *de
 #define RV32EMU_JIT_MAX_CHAIN_LIMIT 4096u
 #define RV32EMU_JIT_DEFAULT_POOL_MB 4u
 #define RV32EMU_JIT_MAX_POOL_MB 1024u
+#define RV32EMU_JIT_DEFAULT_ASYNC_QUEUE 1024u
+#define RV32EMU_JIT_MAX_ASYNC_QUEUE 16384u
+#define RV32EMU_JIT_DEFAULT_ASYNC_WORKERS 2u
+#define RV32EMU_JIT_MAX_ASYNC_WORKERS 8u
+#define RV32EMU_JIT_DEFAULT_ASYNC_BUSY_PCT 75u
+#define RV32EMU_JIT_DEFAULT_ASYNC_HOT_DISCOUNT 1u
+#define RV32EMU_JIT_DEFAULT_ASYNC_HOT_BONUS 0u
+#define RV32EMU_JIT_DEFAULT_ASYNC_DRAIN_INTERVAL 8u
+#define RV32EMU_JIT_TEMPLATE_CACHE_LINES 1024u
+#define RV32EMU_JIT_STRUCT_TEMPLATE_LINES 1024u
+#define RV32EMU_JIT_MAX_PC_RELOCS (RV32EMU_TB_MAX_INSNS + 8u)
+
+#define RV32EMU_JIT_STATE_NONE 0u
+#define RV32EMU_JIT_STATE_QUEUED 1u
+#define RV32EMU_JIT_STATE_READY 2u
+#define RV32EMU_JIT_STATE_FAILED 3u
+
+_Static_assert((RV32EMU_JIT_TEMPLATE_CACHE_LINES &
+                (RV32EMU_JIT_TEMPLATE_CACHE_LINES - 1u)) == 0u,
+               "template cache lines must be a power of two");
 
 static bool rv32emu_tb_env_bool(const char *name, bool default_value) {
   const char *value;
@@ -87,6 +108,75 @@ static inline uint32_t rv32emu_tb_index(uint32_t pc) {
   return (pc >> 2) & (RV32EMU_TB_LINES - 1u);
 }
 
+static inline uint32_t rv32emu_tb_slot(uint32_t set_idx, uint32_t way) {
+  return set_idx * RV32EMU_TB_WAYS + way;
+}
+
+static uint8_t rv32emu_tb_line_evict_priority(const rv32emu_tb_line_t *line) {
+  if (line == NULL || !line->valid) {
+    return 255u;
+  }
+
+  switch (line->jit_state) {
+  case RV32EMU_JIT_STATE_FAILED:
+    return 5u;
+  case RV32EMU_JIT_STATE_NONE:
+    return 4u;
+  case RV32EMU_JIT_STATE_READY:
+    return 3u;
+  case RV32EMU_JIT_STATE_QUEUED:
+    return 1u;
+  default:
+    return 2u;
+  }
+}
+
+static rv32emu_tb_line_t *rv32emu_tb_find_cached_line(rv32emu_tb_cache_t *cache, uint32_t pc) {
+  uint32_t set_idx;
+
+  if (cache == NULL) {
+    return NULL;
+  }
+
+  set_idx = rv32emu_tb_index(pc);
+  for (uint32_t way = 0u; way < RV32EMU_TB_WAYS; way++) {
+    rv32emu_tb_line_t *line = &cache->lines[rv32emu_tb_slot(set_idx, way)];
+    if (line->valid && line->start_pc == pc) {
+      return line;
+    }
+  }
+
+  return NULL;
+}
+
+static rv32emu_tb_line_t *rv32emu_tb_pick_victim_line(rv32emu_tb_cache_t *cache, uint32_t set_idx) {
+  rv32emu_tb_line_t *best_line = NULL;
+  uint8_t best_prio = 0u;
+  uint8_t best_hotness = UINT8_MAX;
+
+  if (cache == NULL || set_idx >= RV32EMU_TB_LINES) {
+    return NULL;
+  }
+
+  for (uint32_t way = 0u; way < RV32EMU_TB_WAYS; way++) {
+    rv32emu_tb_line_t *line = &cache->lines[rv32emu_tb_slot(set_idx, way)];
+    uint8_t prio;
+
+    if (!line->valid) {
+      return line;
+    }
+    prio = rv32emu_tb_line_evict_priority(line);
+    if (best_line == NULL || prio > best_prio ||
+        (prio == best_prio && line->jit_hotness <= best_hotness)) {
+      best_line = line;
+      best_prio = prio;
+      best_hotness = line->jit_hotness;
+    }
+  }
+
+  return best_line;
+}
+
 static bool rv32emu_tb_is_block_terminator(uint32_t opcode) {
   switch (opcode) {
   case 0x63: /* branch */
@@ -129,6 +219,65 @@ static size_t rv32emu_tb_jit_pool_size_from_env(void) {
   return (size_t)pool_mb * 1024u * 1024u;
 }
 
+static bool rv32emu_tb_jit_async_enabled_from_env(void) {
+  return rv32emu_tb_env_bool("RV32EMU_EXPERIMENTAL_JIT_ASYNC", false);
+}
+
+static uint32_t rv32emu_tb_jit_async_workers_from_env(void) {
+  return rv32emu_tb_u32_from_env("RV32EMU_EXPERIMENTAL_JIT_ASYNC_WORKERS",
+                                 RV32EMU_JIT_DEFAULT_ASYNC_WORKERS, 1u,
+                                 RV32EMU_JIT_MAX_ASYNC_WORKERS);
+}
+
+static uint32_t rv32emu_tb_jit_async_queue_from_env(void) {
+  return rv32emu_tb_u32_from_env("RV32EMU_EXPERIMENTAL_JIT_ASYNC_QUEUE",
+                                 RV32EMU_JIT_DEFAULT_ASYNC_QUEUE, 64u, RV32EMU_JIT_MAX_ASYNC_QUEUE);
+}
+
+static bool rv32emu_tb_jit_async_foreground_sync_from_env(void) {
+  return rv32emu_tb_env_bool("RV32EMU_EXPERIMENTAL_JIT_ASYNC_FOREGROUND_SYNC", true);
+}
+
+static bool rv32emu_tb_jit_async_prefetch_enabled_from_env(void) {
+  return rv32emu_tb_env_bool("RV32EMU_EXPERIMENTAL_JIT_ASYNC_PREFETCH", false);
+}
+
+static bool rv32emu_tb_jit_async_allow_helpers_from_env(void) {
+  return rv32emu_tb_env_bool("RV32EMU_EXPERIMENTAL_JIT_ASYNC_ALLOW_HELPERS", true);
+}
+
+static bool rv32emu_tb_jit_async_redecode_helpers_from_env(void) {
+  return rv32emu_tb_env_bool("RV32EMU_EXPERIMENTAL_JIT_ASYNC_REDECODE_HELPERS", false);
+}
+
+static bool rv32emu_tb_jit_async_recycle_from_env(void) {
+  return rv32emu_tb_env_bool("RV32EMU_EXPERIMENTAL_JIT_ASYNC_RECYCLE", false);
+}
+
+static bool rv32emu_tb_jit_template_fast_apply_from_env(void) {
+  return rv32emu_tb_env_bool("RV32EMU_EXPERIMENTAL_JIT_TEMPLATE_FAST_APPLY", false);
+}
+
+static uint8_t rv32emu_tb_jit_async_sync_fallback_spins_from_env(void) {
+  return (uint8_t)rv32emu_tb_u32_from_env("RV32EMU_EXPERIMENTAL_JIT_ASYNC_SYNC_FALLBACK_SPINS",
+                                          8u, 0u, 255u);
+}
+
+static uint8_t rv32emu_tb_jit_async_busy_pct_from_env(void) {
+  return (uint8_t)rv32emu_tb_u32_from_env("RV32EMU_EXPERIMENTAL_JIT_ASYNC_BUSY_PCT",
+                                          RV32EMU_JIT_DEFAULT_ASYNC_BUSY_PCT, 10u, 100u);
+}
+
+static uint8_t rv32emu_tb_jit_async_hot_discount_from_env(void) {
+  return (uint8_t)rv32emu_tb_u32_from_env("RV32EMU_EXPERIMENTAL_JIT_ASYNC_HOT_DISCOUNT",
+                                          RV32EMU_JIT_DEFAULT_ASYNC_HOT_DISCOUNT, 0u, 254u);
+}
+
+static uint8_t rv32emu_tb_jit_async_hot_bonus_from_env(void) {
+  return (uint8_t)rv32emu_tb_u32_from_env("RV32EMU_EXPERIMENTAL_JIT_ASYNC_HOT_BONUS",
+                                          RV32EMU_JIT_DEFAULT_ASYNC_HOT_BONUS, 0u, 255u);
+}
+
 typedef struct {
   atomic_uint_fast64_t dispatch_calls;
   atomic_uint_fast64_t dispatch_no_ready;
@@ -139,6 +288,10 @@ typedef struct {
   atomic_uint_fast64_t dispatch_noprogress;
   atomic_uint_fast64_t compile_attempts;
   atomic_uint_fast64_t compile_success;
+  atomic_uint_fast64_t compile_template_hits;
+  atomic_uint_fast64_t compile_template_stores;
+  atomic_uint_fast64_t compile_struct_hits;
+  atomic_uint_fast64_t compile_struct_stores;
   atomic_uint_fast64_t compile_prefix_insns;
   atomic_uint_fast64_t compile_prefix_truncated;
   atomic_uint_fast64_t compile_fail_too_short;
@@ -149,6 +302,21 @@ typedef struct {
   atomic_uint_fast64_t helper_cf_calls;
   atomic_uint_fast64_t chain_hits;
   atomic_uint_fast64_t chain_misses;
+  atomic_uint_fast64_t async_jobs_enqueued;
+  atomic_uint_fast64_t async_jobs_dropped;
+  atomic_uint_fast64_t async_jobs_compiled;
+  atomic_uint_fast64_t async_results_applied;
+  atomic_uint_fast64_t async_results_stale;
+  atomic_uint_fast64_t async_template_applied;
+  atomic_uint_fast64_t async_applied_direct;
+  atomic_uint_fast64_t async_applied_recycled;
+  atomic_uint_fast64_t async_stale_nonportable;
+  atomic_uint_fast64_t async_stale_not_success;
+  atomic_uint_fast64_t async_stale_lookup_miss;
+  atomic_uint_fast64_t async_stale_state_mismatch;
+  atomic_uint_fast64_t async_stale_sig_mismatch;
+  atomic_uint_fast64_t async_evict_queued;
+  atomic_uint_fast64_t async_sync_fallbacks;
 } rv32emu_jit_stats_t;
 
 static rv32emu_jit_stats_t g_rv32emu_jit_stats = {
@@ -161,6 +329,10 @@ static rv32emu_jit_stats_t g_rv32emu_jit_stats = {
     .dispatch_noprogress = ATOMIC_VAR_INIT(0u),
     .compile_attempts = ATOMIC_VAR_INIT(0u),
     .compile_success = ATOMIC_VAR_INIT(0u),
+    .compile_template_hits = ATOMIC_VAR_INIT(0u),
+    .compile_template_stores = ATOMIC_VAR_INIT(0u),
+    .compile_struct_hits = ATOMIC_VAR_INIT(0u),
+    .compile_struct_stores = ATOMIC_VAR_INIT(0u),
     .compile_prefix_insns = ATOMIC_VAR_INIT(0u),
     .compile_prefix_truncated = ATOMIC_VAR_INIT(0u),
     .compile_fail_too_short = ATOMIC_VAR_INIT(0u),
@@ -171,9 +343,35 @@ static rv32emu_jit_stats_t g_rv32emu_jit_stats = {
     .helper_cf_calls = ATOMIC_VAR_INIT(0u),
     .chain_hits = ATOMIC_VAR_INIT(0u),
     .chain_misses = ATOMIC_VAR_INIT(0u),
+    .async_jobs_enqueued = ATOMIC_VAR_INIT(0u),
+    .async_jobs_dropped = ATOMIC_VAR_INIT(0u),
+    .async_jobs_compiled = ATOMIC_VAR_INIT(0u),
+    .async_results_applied = ATOMIC_VAR_INIT(0u),
+    .async_results_stale = ATOMIC_VAR_INIT(0u),
+    .async_template_applied = ATOMIC_VAR_INIT(0u),
+    .async_applied_direct = ATOMIC_VAR_INIT(0u),
+    .async_applied_recycled = ATOMIC_VAR_INIT(0u),
+    .async_stale_nonportable = ATOMIC_VAR_INIT(0u),
+    .async_stale_not_success = ATOMIC_VAR_INIT(0u),
+    .async_stale_lookup_miss = ATOMIC_VAR_INIT(0u),
+    .async_stale_state_mismatch = ATOMIC_VAR_INIT(0u),
+    .async_stale_sig_mismatch = ATOMIC_VAR_INIT(0u),
+    .async_evict_queued = ATOMIC_VAR_INIT(0u),
+    .async_sync_fallbacks = ATOMIC_VAR_INIT(0u),
 };
 
 static atomic_uint_fast32_t g_rv32emu_jit_stats_mode = ATOMIC_VAR_INIT(0u);
+static atomic_uint_fast32_t g_rv32emu_jit_generation_seed = ATOMIC_VAR_INIT(1u);
+
+static uint32_t rv32emu_tb_next_jit_generation(void) {
+  uint_fast32_t gen =
+      atomic_fetch_add_explicit(&g_rv32emu_jit_generation_seed, 1u, memory_order_relaxed);
+  if (gen == UINT32_MAX) {
+    atomic_store_explicit(&g_rv32emu_jit_generation_seed, 1u, memory_order_relaxed);
+    gen = atomic_fetch_add_explicit(&g_rv32emu_jit_generation_seed, 1u, memory_order_relaxed);
+  }
+  return (uint32_t)gen;
+}
 
 static bool rv32emu_jit_stats_enabled(void) {
   uint_fast32_t mode = atomic_load_explicit(&g_rv32emu_jit_stats_mode, memory_order_acquire);
@@ -220,11 +418,124 @@ typedef struct {
   uint8_t *end;
 } rv32emu_x86_emit_t;
 
+typedef struct {
+  uint8_t jit_count;
+  rv32emu_tb_jit_fn_t jit_fn;
+  uint8_t jit_map_count;
+  uint32_t jit_code_size;
+  uint8_t pc_reloc_count;
+  uint32_t base_start_pc;
+  uint16_t pc_reloc_off[RV32EMU_JIT_MAX_PC_RELOCS];
+  uint16_t jit_host_off[RV32EMU_TB_MAX_INSNS];
+} rv32emu_jit_compiled_artifact_t;
+
+typedef struct {
+  bool valid;
+  uint8_t jit_count;
+  uint64_t prefix_sig;
+  uint32_t pcs[RV32EMU_TB_MAX_INSNS];
+  uint32_t raw[RV32EMU_TB_MAX_INSNS];
+  uint8_t insn_len[RV32EMU_TB_MAX_INSNS];
+  rv32emu_jit_compiled_artifact_t artifact;
+} rv32emu_jit_template_line_t;
+
+typedef struct {
+  rv32emu_jit_template_line_t lines[RV32EMU_JIT_TEMPLATE_CACHE_LINES];
+  pthread_mutex_t lock;
+} rv32emu_jit_template_cache_t;
+
+typedef struct {
+  bool valid;
+  uint8_t jit_count;
+  uint64_t struct_sig;
+  uint32_t raw[RV32EMU_TB_MAX_INSNS];
+  uint8_t insn_len[RV32EMU_TB_MAX_INSNS];
+  rv32emu_jit_compiled_artifact_t artifact;
+} rv32emu_jit_struct_template_line_t;
+
+typedef struct {
+  rv32emu_jit_struct_template_line_t lines[RV32EMU_JIT_STRUCT_TEMPLATE_LINES];
+  pthread_mutex_t lock;
+} rv32emu_jit_struct_template_cache_t;
+
+typedef struct {
+  rv32emu_tb_line_t *line;
+  uint32_t start_pc;
+  uint32_t generation;
+  bool portable;
+  uint8_t count;
+  uint8_t max_block_insns;
+  uint8_t min_prefix_insns;
+  uint32_t pcs[RV32EMU_TB_MAX_INSNS];
+  rv32emu_decoded_insn_t decoded[RV32EMU_TB_MAX_INSNS];
+} rv32emu_jit_async_job_t;
+
+typedef struct {
+  rv32emu_tb_line_t *line;
+  uint32_t start_pc;
+  uint32_t generation;
+  uint64_t prefix_sig;
+  bool portable;
+  bool success;
+  rv32emu_jit_compiled_artifact_t artifact;
+} rv32emu_jit_async_done_t;
+
+typedef struct {
+  pthread_t workers[RV32EMU_JIT_MAX_ASYNC_WORKERS];
+  rv32emu_jit_async_job_t *pending;
+  rv32emu_jit_async_done_t *done;
+  uint32_t worker_count;
+  uint32_t queue_cap;
+  uint32_t pending_head;
+  uint32_t pending_tail;
+  uint32_t pending_count;
+  uint32_t done_head;
+  uint32_t done_tail;
+  uint32_t done_count;
+  bool running;
+  pthread_mutex_t lock;
+  pthread_cond_t pending_cv;
+  pthread_once_t once;
+} rv32emu_jit_async_mgr_t;
+
+static bool rv32emu_tb_compile_jit_from_snapshot(const rv32emu_decoded_insn_t *decoded,
+                                                 const uint32_t *pcs, uint8_t count,
+                                                 rv32emu_tb_line_t *line_for_chain,
+                                                 uint32_t chain_from_pc,
+                                                 uint8_t max_jit_insns, uint8_t min_prefix_insns,
+                                                 rv32emu_jit_compiled_artifact_t *artifact_out);
+static void *rv32emu_jit_async_worker_main(void *opaque);
+
 static rv32emu_jit_pool_t g_rv32emu_jit_pool = {
     .base = NULL,
     .cap = 0u,
     .used = 0u,
     .lock = PTHREAD_MUTEX_INITIALIZER,
+    .once = PTHREAD_ONCE_INIT,
+};
+static atomic_bool g_rv32emu_jit_pool_exhausted = ATOMIC_VAR_INIT(false);
+static rv32emu_jit_template_cache_t g_rv32emu_jit_template_cache = {
+    .lock = PTHREAD_MUTEX_INITIALIZER,
+};
+static rv32emu_jit_struct_template_cache_t g_rv32emu_jit_struct_template_cache = {
+    .lock = PTHREAD_MUTEX_INITIALIZER,
+};
+
+static rv32emu_jit_async_mgr_t g_rv32emu_jit_async_mgr = {
+    .workers = {0},
+    .pending = NULL,
+    .done = NULL,
+    .worker_count = 0u,
+    .queue_cap = 0u,
+    .pending_head = 0u,
+    .pending_tail = 0u,
+    .pending_count = 0u,
+    .done_head = 0u,
+    .done_tail = 0u,
+    .done_count = 0u,
+    .running = false,
+    .lock = PTHREAD_MUTEX_INITIALIZER,
+    .pending_cv = PTHREAD_COND_INITIALIZER,
     .once = PTHREAD_ONCE_INIT,
 };
 
@@ -241,12 +552,18 @@ static void rv32emu_jit_pool_init_once(void) {
     g_rv32emu_jit_pool.base = NULL;
     g_rv32emu_jit_pool.cap = 0u;
     g_rv32emu_jit_pool.used = 0u;
+    atomic_store_explicit(&g_rv32emu_jit_pool_exhausted, true, memory_order_relaxed);
     return;
   }
 
   g_rv32emu_jit_pool.base = (uint8_t *)mem;
   g_rv32emu_jit_pool.cap = pool_size;
   g_rv32emu_jit_pool.used = 0u;
+  atomic_store_explicit(&g_rv32emu_jit_pool_exhausted, false, memory_order_relaxed);
+}
+
+static bool rv32emu_jit_pool_is_exhausted(void) {
+  return atomic_load_explicit(&g_rv32emu_jit_pool_exhausted, memory_order_relaxed);
 }
 
 static void *rv32emu_jit_alloc(size_t bytes) {
@@ -270,11 +587,240 @@ static void *rv32emu_jit_alloc(size_t bytes) {
     if (aligned_used + bytes <= g_rv32emu_jit_pool.cap) {
       out = g_rv32emu_jit_pool.base + aligned_used;
       g_rv32emu_jit_pool.used = aligned_used + bytes;
+    } else {
+      atomic_store_explicit(&g_rv32emu_jit_pool_exhausted, true, memory_order_relaxed);
     }
   }
 
   (void)pthread_mutex_unlock(&g_rv32emu_jit_pool.lock);
   return out;
+}
+
+static bool rv32emu_jit_template_match_locked(const rv32emu_jit_template_line_t *line,
+                                              const rv32emu_decoded_insn_t *decoded,
+                                              const uint32_t *pcs, uint8_t jit_count,
+                                              uint64_t prefix_sig) {
+  if (line == NULL || decoded == NULL || pcs == NULL || jit_count == 0u ||
+      jit_count > RV32EMU_TB_MAX_INSNS || !line->valid || line->jit_count != jit_count ||
+      line->prefix_sig != prefix_sig) {
+    return false;
+  }
+
+  for (uint8_t i = 0u; i < jit_count; i++) {
+    if (line->pcs[i] != pcs[i] || line->raw[i] != decoded[i].raw ||
+        line->insn_len[i] != decoded[i].insn_len) {
+      return false;
+    }
+  }
+
+  return line->artifact.jit_count != 0u && line->artifact.jit_fn != NULL;
+}
+
+static bool rv32emu_jit_template_lookup(const rv32emu_decoded_insn_t *decoded, const uint32_t *pcs,
+                                        uint8_t jit_count, uint64_t prefix_sig,
+                                        rv32emu_jit_compiled_artifact_t *artifact_out) {
+  rv32emu_jit_template_cache_t *cache = &g_rv32emu_jit_template_cache;
+  rv32emu_jit_template_line_t *line;
+  uint32_t idx;
+  bool found = false;
+
+  if (decoded == NULL || pcs == NULL || jit_count == 0u || prefix_sig == 0u || artifact_out == NULL) {
+    return false;
+  }
+
+  idx = (uint32_t)prefix_sig & (RV32EMU_JIT_TEMPLATE_CACHE_LINES - 1u);
+  if (pthread_mutex_lock(&cache->lock) != 0) {
+    return false;
+  }
+  line = &cache->lines[idx];
+  if (rv32emu_jit_template_match_locked(line, decoded, pcs, jit_count, prefix_sig)) {
+    *artifact_out = line->artifact;
+    found = true;
+  }
+  (void)pthread_mutex_unlock(&cache->lock);
+
+  if (found) {
+    RV32EMU_JIT_STATS_INC(compile_template_hits);
+  }
+  return found;
+}
+
+static void rv32emu_jit_template_store(const rv32emu_decoded_insn_t *decoded, const uint32_t *pcs,
+                                       uint8_t jit_count, uint64_t prefix_sig,
+                                       const rv32emu_jit_compiled_artifact_t *artifact) {
+  rv32emu_jit_template_cache_t *cache = &g_rv32emu_jit_template_cache;
+  rv32emu_jit_template_line_t *line;
+  uint32_t idx;
+
+  if (decoded == NULL || pcs == NULL || jit_count == 0u || prefix_sig == 0u || artifact == NULL ||
+      artifact->jit_count != jit_count || artifact->jit_fn == NULL) {
+    return;
+  }
+
+  idx = (uint32_t)prefix_sig & (RV32EMU_JIT_TEMPLATE_CACHE_LINES - 1u);
+  if (pthread_mutex_lock(&cache->lock) != 0) {
+    return;
+  }
+  line = &cache->lines[idx];
+  line->valid = true;
+  line->jit_count = jit_count;
+  line->prefix_sig = prefix_sig;
+  for (uint8_t i = 0u; i < jit_count; i++) {
+    line->pcs[i] = pcs[i];
+    line->raw[i] = decoded[i].raw;
+    line->insn_len[i] = decoded[i].insn_len;
+  }
+  line->artifact = *artifact;
+  (void)pthread_mutex_unlock(&cache->lock);
+  RV32EMU_JIT_STATS_INC(compile_template_stores);
+}
+
+static uint64_t rv32emu_tb_structure_signature(const rv32emu_decoded_insn_t *decoded,
+                                               uint8_t jit_count) {
+  uint64_t h = UINT64_C(1469598103934665603);
+
+  if (decoded == NULL || jit_count == 0u || jit_count > RV32EMU_TB_MAX_INSNS) {
+    return 0u;
+  }
+
+  for (uint8_t i = 0u; i < jit_count; i++) {
+    h ^= (uint64_t)decoded[i].raw;
+    h *= UINT64_C(1099511628211);
+    h ^= (uint64_t)decoded[i].insn_len;
+    h *= UINT64_C(1099511628211);
+  }
+
+  h ^= (uint64_t)jit_count;
+  h *= UINT64_C(1099511628211);
+  return (h == 0u) ? 1u : h;
+}
+
+static bool rv32emu_jit_clone_artifact_with_delta(const rv32emu_jit_compiled_artifact_t *template_artifact,
+                                                  uint32_t start_pc,
+                                                  rv32emu_jit_compiled_artifact_t *artifact_out) {
+  uint8_t *dst;
+  uint8_t *src;
+  uint32_t delta;
+
+  if (template_artifact == NULL || artifact_out == NULL || template_artifact->jit_fn == NULL ||
+      template_artifact->jit_code_size == 0u) {
+    return false;
+  }
+
+  dst = (uint8_t *)rv32emu_jit_alloc((size_t)template_artifact->jit_code_size);
+  if (dst == NULL) {
+    RV32EMU_JIT_STATS_INC(compile_fail_alloc);
+    return false;
+  }
+  src = (uint8_t *)(void *)template_artifact->jit_fn;
+  memcpy(dst, src, (size_t)template_artifact->jit_code_size);
+
+  *artifact_out = *template_artifact;
+  artifact_out->jit_fn = (rv32emu_tb_jit_fn_t)(void *)dst;
+  delta = start_pc - template_artifact->base_start_pc;
+  if (delta != 0u) {
+    for (uint8_t i = 0u; i < template_artifact->pc_reloc_count; i++) {
+      uint16_t off = template_artifact->pc_reloc_off[i];
+      uint32_t value;
+
+      if ((uint32_t)off + 4u > template_artifact->jit_code_size) {
+        return false;
+      }
+      memcpy(&value, dst + off, sizeof(value));
+      value += delta;
+      memcpy(dst + off, &value, sizeof(value));
+    }
+  }
+  artifact_out->base_start_pc = start_pc;
+  return true;
+}
+
+static bool rv32emu_jit_struct_template_lookup(const rv32emu_decoded_insn_t *decoded, uint8_t jit_count,
+                                               uint32_t start_pc,
+                                               rv32emu_jit_compiled_artifact_t *artifact_out) {
+  rv32emu_jit_struct_template_cache_t *cache = &g_rv32emu_jit_struct_template_cache;
+  rv32emu_jit_compiled_artifact_t template_artifact;
+  uint64_t sig;
+  uint32_t idx;
+  bool matched = false;
+
+  if (decoded == NULL || artifact_out == NULL || jit_count == 0u || jit_count > RV32EMU_TB_MAX_INSNS) {
+    return false;
+  }
+
+  sig = rv32emu_tb_structure_signature(decoded, jit_count);
+  if (sig == 0u) {
+    return false;
+  }
+
+  idx = (uint32_t)sig & (RV32EMU_JIT_STRUCT_TEMPLATE_LINES - 1u);
+  if (pthread_mutex_lock(&cache->lock) != 0) {
+    return false;
+  }
+  {
+    rv32emu_jit_struct_template_line_t *line = &cache->lines[idx];
+    if (line->valid && line->jit_count == jit_count && line->struct_sig == sig &&
+        line->artifact.jit_count == jit_count && line->artifact.jit_fn != NULL &&
+        line->artifact.pc_reloc_count != 0u) {
+      matched = true;
+      for (uint8_t i = 0u; i < jit_count; i++) {
+        if (line->raw[i] != decoded[i].raw || line->insn_len[i] != decoded[i].insn_len) {
+          matched = false;
+          break;
+        }
+      }
+      if (matched) {
+        template_artifact = line->artifact;
+      }
+    }
+  }
+  (void)pthread_mutex_unlock(&cache->lock);
+  if (!matched) {
+    return false;
+  }
+
+  if (!rv32emu_jit_clone_artifact_with_delta(&template_artifact, start_pc, artifact_out)) {
+    return false;
+  }
+  RV32EMU_JIT_STATS_INC(compile_struct_hits);
+  RV32EMU_JIT_STATS_INC(compile_template_hits);
+  return true;
+}
+
+static void rv32emu_jit_struct_template_store(const rv32emu_decoded_insn_t *decoded, uint8_t jit_count,
+                                              const rv32emu_jit_compiled_artifact_t *artifact) {
+  rv32emu_jit_struct_template_cache_t *cache = &g_rv32emu_jit_struct_template_cache;
+  uint64_t sig;
+  uint32_t idx;
+
+  if (decoded == NULL || artifact == NULL || jit_count == 0u || jit_count > RV32EMU_TB_MAX_INSNS ||
+      artifact->jit_fn == NULL || artifact->jit_count != jit_count || artifact->pc_reloc_count == 0u) {
+    return;
+  }
+
+  sig = rv32emu_tb_structure_signature(decoded, jit_count);
+  if (sig == 0u) {
+    return;
+  }
+
+  idx = (uint32_t)sig & (RV32EMU_JIT_STRUCT_TEMPLATE_LINES - 1u);
+  if (pthread_mutex_lock(&cache->lock) != 0) {
+    return;
+  }
+  {
+    rv32emu_jit_struct_template_line_t *line = &cache->lines[idx];
+    line->valid = true;
+    line->jit_count = jit_count;
+    line->struct_sig = sig;
+    for (uint8_t i = 0u; i < jit_count; i++) {
+      line->raw[i] = decoded[i].raw;
+      line->insn_len[i] = decoded[i].insn_len;
+    }
+    line->artifact = *artifact;
+  }
+  (void)pthread_mutex_unlock(&cache->lock);
+  RV32EMU_JIT_STATS_INC(compile_struct_stores);
+  RV32EMU_JIT_STATS_INC(compile_template_stores);
 }
 
 static int rv32emu_jit_block_commit(rv32emu_machine_t *m, rv32emu_cpu_t *cpu, uint32_t next_pc,
@@ -437,6 +983,30 @@ static bool rv32emu_jit_load_value(rv32emu_machine_t *m, uint32_t addr, uint32_t
   }
 }
 
+static bool rv32emu_jit_decode_at_pc(rv32emu_machine_t *m, uint32_t pc,
+                                     rv32emu_decoded_insn_t *decoded_out) {
+  uint32_t insn16 = 0u;
+  uint32_t insn32 = 0u;
+
+  if (m == NULL || decoded_out == NULL) {
+    return false;
+  }
+  if ((pc & 1u) != 0u) {
+    return false;
+  }
+  if (!rv32emu_virt_read(m, pc, 2, RV32EMU_ACC_FETCH, &insn16)) {
+    return false;
+  }
+  if ((insn16 & 0x3u) != 0x3u) {
+    return rv32emu_decode16((uint16_t)insn16, decoded_out);
+  }
+  if (!rv32emu_virt_read(m, pc, 4, RV32EMU_ACC_FETCH, &insn32)) {
+    return false;
+  }
+  rv32emu_decode32(insn32, decoded_out);
+  return true;
+}
+
 static bool rv32emu_jit_store_value(rv32emu_machine_t *m, uint32_t addr, uint32_t funct3,
                                     uint32_t value) {
   if (m == NULL) {
@@ -468,6 +1038,9 @@ static bool rv32emu_jit_store_value(rv32emu_machine_t *m, uint32_t addr, uint32_
 static uint32_t rv32emu_jit_exec_mem(rv32emu_machine_t *m, rv32emu_cpu_t *cpu,
                                      const rv32emu_decoded_insn_t *d, uint32_t insn_pc,
                                      uint32_t retired_prefix) {
+  rv32emu_tb_cache_t *cache = g_rv32emu_jit_tls_cache;
+  rv32emu_decoded_insn_t decoded_local;
+  const rv32emu_decoded_insn_t *effective = d;
   uint32_t rs1v;
   uint32_t rs2v;
   uint32_t addr;
@@ -480,18 +1053,28 @@ static uint32_t rv32emu_jit_exec_mem(rv32emu_machine_t *m, rv32emu_cpu_t *cpu,
     g_rv32emu_jit_tls_handled = true;
     return rv32emu_jit_result_or_no_retire();
   }
+  if (cache != NULL && cache->jit_async_enabled && cache->jit_async_redecode_helpers) {
+    if (!rv32emu_jit_decode_at_pc(m, insn_pc, &decoded_local)) {
+      if (retired_prefix != 0u) {
+        rv32emu_jit_retire_prefix(m, cpu, retired_prefix);
+      }
+      g_rv32emu_jit_tls_handled = true;
+      return rv32emu_jit_result_or_no_retire();
+    }
+    effective = &decoded_local;
+  }
 
   cpu->pc = insn_pc;
-  rs1v = cpu->x[d->rs1];
-  rs2v = cpu->x[d->rs2];
+  rs1v = cpu->x[effective->rs1];
+  rs2v = cpu->x[effective->rs2];
 
-  switch (d->opcode) {
+  switch (effective->opcode) {
   case 0x03: /* load */
-    addr = rs1v + (uint32_t)d->imm_i;
-    if (!rv32emu_jit_load_value(m, addr, d->funct3, &value)) {
-      if (d->funct3 != 0x0u && d->funct3 != 0x1u && d->funct3 != 0x2u && d->funct3 != 0x4u &&
-          d->funct3 != 0x5u) {
-        rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, d->raw);
+    addr = rs1v + (uint32_t)effective->imm_i;
+    if (!rv32emu_jit_load_value(m, addr, effective->funct3, &value)) {
+      if (effective->funct3 != 0x0u && effective->funct3 != 0x1u && effective->funct3 != 0x2u &&
+          effective->funct3 != 0x4u && effective->funct3 != 0x5u) {
+        rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, effective->raw);
       }
       if (retired_prefix != 0u) {
         rv32emu_jit_retire_prefix(m, cpu, retired_prefix);
@@ -499,14 +1082,14 @@ static uint32_t rv32emu_jit_exec_mem(rv32emu_machine_t *m, rv32emu_cpu_t *cpu,
       g_rv32emu_jit_tls_handled = true;
       return rv32emu_jit_result_or_no_retire();
     }
-    rv32emu_jit_write_rd(cpu, d->rd, value);
+    rv32emu_jit_write_rd(cpu, effective->rd, value);
     return 0u;
   case 0x23: /* store */
-    addr = rs1v + (uint32_t)d->imm_s;
-    ok = rv32emu_jit_store_value(m, addr, d->funct3, rs2v);
+    addr = rs1v + (uint32_t)effective->imm_s;
+    ok = rv32emu_jit_store_value(m, addr, effective->funct3, rs2v);
     if (!ok) {
-      if (d->funct3 != 0x0u && d->funct3 != 0x1u && d->funct3 != 0x2u) {
-        rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, d->raw);
+      if (effective->funct3 != 0x0u && effective->funct3 != 0x1u && effective->funct3 != 0x2u) {
+        rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, effective->raw);
       }
       if (retired_prefix != 0u) {
         rv32emu_jit_retire_prefix(m, cpu, retired_prefix);
@@ -516,7 +1099,7 @@ static uint32_t rv32emu_jit_exec_mem(rv32emu_machine_t *m, rv32emu_cpu_t *cpu,
     }
     return 0u;
   default:
-    rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, d->raw);
+    rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, effective->raw);
     if (retired_prefix != 0u) {
       rv32emu_jit_retire_prefix(m, cpu, retired_prefix);
     }
@@ -528,6 +1111,9 @@ static uint32_t rv32emu_jit_exec_mem(rv32emu_machine_t *m, rv32emu_cpu_t *cpu,
 static uint32_t rv32emu_jit_exec_cf(rv32emu_machine_t *m, rv32emu_cpu_t *cpu,
                                     const rv32emu_decoded_insn_t *d, uint32_t insn_pc,
                                     uint32_t retired_prefix) {
+  rv32emu_tb_cache_t *cache = g_rv32emu_jit_tls_cache;
+  rv32emu_decoded_insn_t decoded_local;
+  const rv32emu_decoded_insn_t *effective = d;
   uint32_t next_pc;
   uint32_t ret_pc;
   uint32_t rs1v;
@@ -539,64 +1125,74 @@ static uint32_t rv32emu_jit_exec_cf(rv32emu_machine_t *m, rv32emu_cpu_t *cpu,
     g_rv32emu_jit_tls_handled = true;
     return rv32emu_jit_result_or_no_retire();
   }
-
-  cpu->pc = insn_pc;
-  next_pc = insn_pc + ((d->insn_len == 2u) ? 2u : 4u);
-  ret_pc = next_pc;
-  rs1v = cpu->x[d->rs1];
-  rs2v = cpu->x[d->rs2];
-
-  switch (d->opcode) {
-  case 0x6f: /* jal */
-    rv32emu_jit_write_rd(cpu, d->rd, ret_pc);
-    next_pc = insn_pc + (uint32_t)d->imm_j;
-    break;
-  case 0x67: /* jalr */
-    if (d->funct3 != 0x0u) {
-      rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, d->raw);
+  if (cache != NULL && cache->jit_async_enabled && cache->jit_async_redecode_helpers) {
+    if (!rv32emu_jit_decode_at_pc(m, insn_pc, &decoded_local)) {
       if (retired_prefix != 0u) {
         rv32emu_jit_retire_prefix(m, cpu, retired_prefix);
       }
       g_rv32emu_jit_tls_handled = true;
       return rv32emu_jit_result_or_no_retire();
     }
-    next_pc = (rs1v + (uint32_t)d->imm_i) & ~1u;
-    rv32emu_jit_write_rd(cpu, d->rd, ret_pc);
+    effective = &decoded_local;
+  }
+
+  cpu->pc = insn_pc;
+  next_pc = insn_pc + ((effective->insn_len == 2u) ? 2u : 4u);
+  ret_pc = next_pc;
+  rs1v = cpu->x[effective->rs1];
+  rs2v = cpu->x[effective->rs2];
+
+  switch (effective->opcode) {
+  case 0x6f: /* jal */
+    rv32emu_jit_write_rd(cpu, effective->rd, ret_pc);
+    next_pc = insn_pc + (uint32_t)effective->imm_j;
+    break;
+  case 0x67: /* jalr */
+    if (effective->funct3 != 0x0u) {
+      rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, effective->raw);
+      if (retired_prefix != 0u) {
+        rv32emu_jit_retire_prefix(m, cpu, retired_prefix);
+      }
+      g_rv32emu_jit_tls_handled = true;
+      return rv32emu_jit_result_or_no_retire();
+    }
+    next_pc = (rs1v + (uint32_t)effective->imm_i) & ~1u;
+    rv32emu_jit_write_rd(cpu, effective->rd, ret_pc);
     break;
   case 0x63: /* branch */
-    switch (d->funct3) {
+    switch (effective->funct3) {
     case 0x0: /* beq */
       if (rs1v == rs2v) {
-        next_pc = insn_pc + (uint32_t)d->imm_b;
+        next_pc = insn_pc + (uint32_t)effective->imm_b;
       }
       break;
     case 0x1: /* bne */
       if (rs1v != rs2v) {
-        next_pc = insn_pc + (uint32_t)d->imm_b;
+        next_pc = insn_pc + (uint32_t)effective->imm_b;
       }
       break;
     case 0x4: /* blt */
       if ((int32_t)rs1v < (int32_t)rs2v) {
-        next_pc = insn_pc + (uint32_t)d->imm_b;
+        next_pc = insn_pc + (uint32_t)effective->imm_b;
       }
       break;
     case 0x5: /* bge */
       if ((int32_t)rs1v >= (int32_t)rs2v) {
-        next_pc = insn_pc + (uint32_t)d->imm_b;
+        next_pc = insn_pc + (uint32_t)effective->imm_b;
       }
       break;
     case 0x6: /* bltu */
       if (rs1v < rs2v) {
-        next_pc = insn_pc + (uint32_t)d->imm_b;
+        next_pc = insn_pc + (uint32_t)effective->imm_b;
       }
       break;
     case 0x7: /* bgeu */
       if (rs1v >= rs2v) {
-        next_pc = insn_pc + (uint32_t)d->imm_b;
+        next_pc = insn_pc + (uint32_t)effective->imm_b;
       }
       break;
     default:
-      rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, d->raw);
+      rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, effective->raw);
       if (retired_prefix != 0u) {
         rv32emu_jit_retire_prefix(m, cpu, retired_prefix);
       }
@@ -605,7 +1201,7 @@ static uint32_t rv32emu_jit_exec_cf(rv32emu_machine_t *m, rv32emu_cpu_t *cpu,
     }
     break;
   default:
-    rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, d->raw);
+    rv32emu_raise_exception(m, RV32EMU_EXC_ILLEGAL_INST, effective->raw);
     if (retired_prefix != 0u) {
       rv32emu_jit_retire_prefix(m, cpu, retired_prefix);
     }
@@ -759,50 +1355,96 @@ static bool rv32emu_emit_mov_rdi_saved(rv32emu_x86_emit_t *e) {
 }
 
 static bool rv32emu_emit_jit_mem_helper(rv32emu_x86_emit_t *e, const rv32emu_decoded_insn_t *d,
-                                        uint32_t insn_pc, uint32_t retired_prefix) {
+                                        uint32_t insn_pc, uint32_t retired_prefix,
+                                        uint8_t **insn_pc_imm_ptr) {
   if (e == NULL || d == NULL) {
     return false;
   }
 
-  return rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0x83u) && rv32emu_emit_u8(e, 0xecu) &&
-         rv32emu_emit_u8(e, 0x08u) &&                                       /* sub rsp, 8 */
-         rv32emu_emit_mov_rdx_imm64(e, (uint64_t)(uintptr_t)d) &&           /* arg2: decoded* */
-         rv32emu_emit_u8(e, 0xb9u) && rv32emu_emit_u32(e, insn_pc) &&       /* arg3: insn_pc */
-         rv32emu_emit_mov_r8d_imm32(e, retired_prefix) &&                    /* arg4: retired_prefix */
-         rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0xb8u) &&
-         rv32emu_emit_u64(e, (uint64_t)(uintptr_t)&rv32emu_jit_exec_mem) && /* movabs rax, fn */
-         rv32emu_emit_u8(e, 0xffu) && rv32emu_emit_u8(e, 0xd0u) &&          /* call rax */
-         rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0x83u) && rv32emu_emit_u8(e, 0xc4u) &&
-         rv32emu_emit_u8(e, 0x08u) &&                                         /* add rsp, 8 */
-         rv32emu_emit_u8(e, 0x85u) && rv32emu_emit_u8(e, 0xc0u) &&           /* test eax, eax */
-         rv32emu_emit_u8(e, 0x74u) && rv32emu_emit_u8(e, 0x03u) &&           /* jz +3 (success) */
-         rv32emu_emit_u8(e, 0x5eu) && rv32emu_emit_u8(e, 0x5fu) && rv32emu_emit_u8(e, 0xc3u) &&
-         rv32emu_emit_mov_rsi_saved(e) &&                                     /* restore cpu ptr */
-         rv32emu_emit_mov_rdi_saved(e);                                       /* restore machine ptr */
+  if (!rv32emu_emit_u8(e, 0x48u) || !rv32emu_emit_u8(e, 0x83u) || !rv32emu_emit_u8(e, 0xecu) ||
+      !rv32emu_emit_u8(e, 0x08u)) {
+    return false;
+  }
+  if (!rv32emu_emit_mov_rdx_imm64(e, (uint64_t)(uintptr_t)d)) {
+    return false;
+  }
+  if (insn_pc_imm_ptr != NULL) {
+    *insn_pc_imm_ptr = e->p + 1;
+  }
+  if (!rv32emu_emit_u8(e, 0xb9u) || !rv32emu_emit_u32(e, insn_pc)) {
+    return false;
+  }
+  if (!rv32emu_emit_mov_r8d_imm32(e, retired_prefix)) {
+    return false;
+  }
+  if (!rv32emu_emit_u8(e, 0x48u) || !rv32emu_emit_u8(e, 0xb8u) ||
+      !rv32emu_emit_u64(e, (uint64_t)(uintptr_t)&rv32emu_jit_exec_mem)) {
+    return false;
+  }
+  if (!rv32emu_emit_u8(e, 0xffu) || !rv32emu_emit_u8(e, 0xd0u)) {
+    return false;
+  }
+  if (!rv32emu_emit_u8(e, 0x48u) || !rv32emu_emit_u8(e, 0x83u) || !rv32emu_emit_u8(e, 0xc4u) ||
+      !rv32emu_emit_u8(e, 0x08u)) {
+    return false;
+  }
+  if (!rv32emu_emit_u8(e, 0x85u) || !rv32emu_emit_u8(e, 0xc0u) || !rv32emu_emit_u8(e, 0x74u) ||
+      !rv32emu_emit_u8(e, 0x03u)) {
+    return false;
+  }
+  if (!rv32emu_emit_u8(e, 0x5eu) || !rv32emu_emit_u8(e, 0x5fu) || !rv32emu_emit_u8(e, 0xc3u)) {
+    return false;
+  }
+  if (!rv32emu_emit_mov_rsi_saved(e) || !rv32emu_emit_mov_rdi_saved(e)) {
+    return false;
+  }
+  return true;
 }
 
 static bool rv32emu_emit_jit_cf_helper(rv32emu_x86_emit_t *e, const rv32emu_decoded_insn_t *d,
-                                       uint32_t insn_pc, uint32_t retired_prefix) {
+                                       uint32_t insn_pc, uint32_t retired_prefix,
+                                       uint8_t **insn_pc_imm_ptr) {
   if (e == NULL || d == NULL) {
     return false;
   }
 
-  return rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0x83u) && rv32emu_emit_u8(e, 0xecu) &&
-         rv32emu_emit_u8(e, 0x08u) &&                                      /* sub rsp, 8 */
-         rv32emu_emit_mov_rdx_imm64(e, (uint64_t)(uintptr_t)d) &&          /* arg2: decoded* */
-         rv32emu_emit_u8(e, 0xb9u) && rv32emu_emit_u32(e, insn_pc) &&      /* arg3: insn_pc */
-         rv32emu_emit_mov_r8d_imm32(e, retired_prefix) &&                   /* arg4: retired_prefix */
-         rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0xb8u) &&
-         rv32emu_emit_u64(e, (uint64_t)(uintptr_t)&rv32emu_jit_exec_cf) && /* movabs rax, fn */
-         rv32emu_emit_u8(e, 0xffu) && rv32emu_emit_u8(e, 0xd0u) &&         /* call rax */
-         rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0x83u) && rv32emu_emit_u8(e, 0xc4u) &&
-         rv32emu_emit_u8(e, 0x08u) &&                                      /* add rsp, 8 */
-         rv32emu_emit_u8(e, 0x5eu) && rv32emu_emit_u8(e, 0x5fu) &&
-         rv32emu_emit_u8(e, 0xc3u); /* pop rsi; pop rdi; ret */
+  if (!rv32emu_emit_u8(e, 0x48u) || !rv32emu_emit_u8(e, 0x83u) || !rv32emu_emit_u8(e, 0xecu) ||
+      !rv32emu_emit_u8(e, 0x08u)) {
+    return false;
+  }
+  if (!rv32emu_emit_mov_rdx_imm64(e, (uint64_t)(uintptr_t)d)) {
+    return false;
+  }
+  if (insn_pc_imm_ptr != NULL) {
+    *insn_pc_imm_ptr = e->p + 1;
+  }
+  if (!rv32emu_emit_u8(e, 0xb9u) || !rv32emu_emit_u32(e, insn_pc)) {
+    return false;
+  }
+  if (!rv32emu_emit_mov_r8d_imm32(e, retired_prefix)) {
+    return false;
+  }
+  if (!rv32emu_emit_u8(e, 0x48u) || !rv32emu_emit_u8(e, 0xb8u) ||
+      !rv32emu_emit_u64(e, (uint64_t)(uintptr_t)&rv32emu_jit_exec_cf)) {
+    return false;
+  }
+  if (!rv32emu_emit_u8(e, 0xffu) || !rv32emu_emit_u8(e, 0xd0u)) {
+    return false;
+  }
+  if (!rv32emu_emit_u8(e, 0x48u) || !rv32emu_emit_u8(e, 0x83u) || !rv32emu_emit_u8(e, 0xc4u) ||
+      !rv32emu_emit_u8(e, 0x08u)) {
+    return false;
+  }
+  if (!rv32emu_emit_u8(e, 0x5eu) || !rv32emu_emit_u8(e, 0x5fu) || !rv32emu_emit_u8(e, 0xc3u)) {
+    return false;
+  }
+  return true;
 }
 
 static rv32emu_tb_jit_fn_t rv32emu_jit_chain_next(rv32emu_machine_t *m, rv32emu_cpu_t *cpu,
                                                    rv32emu_tb_line_t *from);
+static rv32emu_tb_jit_fn_t rv32emu_jit_chain_next_pc(rv32emu_machine_t *m, rv32emu_cpu_t *cpu,
+                                                      uint32_t from_pc);
 
 static bool rv32emu_emit_prologue(rv32emu_x86_emit_t *e) {
   return rv32emu_emit_u8(e, 0x57u) && /* push rdi */
@@ -822,10 +1464,55 @@ static bool rv32emu_emit_prologue(rv32emu_x86_emit_t *e) {
          rv32emu_emit_u8(e, 0xc3u); /* pop rsi; pop rdi; ret */
 }
 
-static bool rv32emu_emit_epilogue(rv32emu_x86_emit_t *e, rv32emu_tb_line_t *line, uint32_t next_pc,
-                                  uint32_t retired) {
+static bool rv32emu_emit_epilogue(rv32emu_x86_emit_t *e, rv32emu_tb_line_t *line,
+                                  uint32_t chain_from_pc, uint32_t next_pc, uint32_t retired) {
   if (line == NULL) {
-    return false;
+    if (chain_from_pc != 0u) {
+      return rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0x83u) && rv32emu_emit_u8(e, 0xecu) &&
+             rv32emu_emit_u8(e, 0x08u) && /* sub rsp, 8 */
+             rv32emu_emit_u8(e, 0xbau) && rv32emu_emit_u32(e, next_pc) && /* mov edx, next_pc */
+             rv32emu_emit_u8(e, 0xb9u) && rv32emu_emit_u32(e, retired) && /* mov ecx, retired */
+             rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0xb8u) &&
+             rv32emu_emit_u64(e,
+                              (uint64_t)(uintptr_t)&rv32emu_jit_block_commit) && /* movabs rax, fn */
+             rv32emu_emit_u8(e, 0xffu) && rv32emu_emit_u8(e, 0xd0u) && /* call rax */
+             rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0x83u) && rv32emu_emit_u8(e, 0xc4u) &&
+             rv32emu_emit_u8(e, 0x08u) && /* add rsp, 8 */
+             rv32emu_emit_u8(e, 0x50u) && /* push rax (save cumulative retired) */
+             rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0x8bu) && rv32emu_emit_u8(e, 0x74u) &&
+             rv32emu_emit_u8(e, 0x24u) && rv32emu_emit_u8(e, 0x08u) && /* mov rsi, [rsp + 8] */
+             rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0x8bu) && rv32emu_emit_u8(e, 0x7cu) &&
+             rv32emu_emit_u8(e, 0x24u) && rv32emu_emit_u8(e, 0x10u) && /* mov rdi, [rsp + 16] */
+             rv32emu_emit_u8(e, 0xbau) && rv32emu_emit_u32(e, chain_from_pc) && /* mov edx, pc */
+             rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0xb8u) &&
+             rv32emu_emit_u64(e, (uint64_t)(uintptr_t)&rv32emu_jit_chain_next_pc) &&
+             rv32emu_emit_u8(e, 0xffu) && rv32emu_emit_u8(e, 0xd0u) && /* call rax */
+             rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0x85u) &&
+             rv32emu_emit_u8(e, 0xc0u) && /* test rax, rax */
+             rv32emu_emit_u8(e, 0x75u) && rv32emu_emit_u8(e, 0x04u) && /* jne +4 */
+             rv32emu_emit_u8(e, 0x58u) && /* pop rax */
+             rv32emu_emit_u8(e, 0x5eu) && /* pop rsi */
+             rv32emu_emit_u8(e, 0x5fu) && /* pop rdi */
+             rv32emu_emit_u8(e, 0xc3u) && /* ret */
+             rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0x83u) && rv32emu_emit_u8(e, 0xc4u) &&
+             rv32emu_emit_u8(e, 0x08u) && /* add rsp, 8 (drop saved retired) */
+             rv32emu_emit_u8(e, 0x5eu) && /* pop rsi */
+             rv32emu_emit_u8(e, 0x5fu) && /* pop rdi */
+             rv32emu_emit_u8(e, 0xffu) && rv32emu_emit_u8(e, 0xe0u); /* jmp rax */
+    }
+
+    return rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0x83u) && rv32emu_emit_u8(e, 0xecu) &&
+           rv32emu_emit_u8(e, 0x08u) && /* sub rsp, 8 */
+           rv32emu_emit_u8(e, 0xbau) && rv32emu_emit_u32(e, next_pc) && /* mov edx, next_pc */
+           rv32emu_emit_u8(e, 0xb9u) && rv32emu_emit_u32(e, retired) && /* mov ecx, retired */
+           rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0xb8u) &&
+           rv32emu_emit_u64(e, (uint64_t)(uintptr_t)&rv32emu_jit_block_commit) && /* movabs rax, fn */
+           rv32emu_emit_u8(e, 0xffu) && rv32emu_emit_u8(e, 0xd0u) && /* call rax */
+           rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0x83u) && rv32emu_emit_u8(e, 0xc4u) &&
+           rv32emu_emit_u8(e, 0x08u) && /* add rsp, 8 */
+           rv32emu_emit_u8(e, 0x5eu) && /* pop rsi */
+           rv32emu_emit_u8(e, 0x5fu) && /* pop rdi */
+           rv32emu_emit_u8(e, 0xc3u);  /* ret */
   }
 
   return rv32emu_emit_u8(e, 0x48u) && rv32emu_emit_u8(e, 0x83u) && rv32emu_emit_u8(e, 0xecu) &&
@@ -963,13 +1650,34 @@ static bool rv32emu_jit_insn_supported(const rv32emu_decoded_insn_t *d) {
   }
 }
 
+static bool rv32emu_jit_record_pc_reloc(rv32emu_jit_compiled_artifact_t *artifact, uint8_t *code_ptr,
+                                        uint8_t *imm_ptr) {
+  uint32_t off;
+
+  if (artifact == NULL || code_ptr == NULL || imm_ptr == NULL || imm_ptr < code_ptr ||
+      artifact->pc_reloc_count >= RV32EMU_JIT_MAX_PC_RELOCS) {
+    return false;
+  }
+
+  off = (uint32_t)(uintptr_t)(imm_ptr - code_ptr);
+  if (off > UINT16_MAX) {
+    return false;
+  }
+  artifact->pc_reloc_off[artifact->pc_reloc_count++] = (uint16_t)off;
+  return true;
+}
+
 static bool rv32emu_jit_emit_one(rv32emu_x86_emit_t *e, const rv32emu_decoded_insn_t *d,
-                                 uint32_t insn_pc, uint32_t retired_before) {
+                                 const rv32emu_decoded_insn_t *helper_d, uint32_t insn_pc,
+                                 uint32_t retired_before, uint8_t *code_ptr,
+                                 rv32emu_jit_compiled_artifact_t *artifact) {
   uint32_t rd_off;
   uint32_t rs1_off;
   uint32_t rs2_off;
+  uint8_t *insn_pc_imm_ptr = NULL;
+  uint8_t *auipc_imm_ptr = NULL;
 
-  if (e == NULL || d == NULL) {
+  if (e == NULL || d == NULL || helper_d == NULL || code_ptr == NULL || artifact == NULL) {
     return false;
   }
 
@@ -987,7 +1695,11 @@ static bool rv32emu_jit_emit_one(rv32emu_x86_emit_t *e, const rv32emu_decoded_in
     }
     return true;
   case 0x17: /* auipc */
+    auipc_imm_ptr = e->p + 1;
     if (!rv32emu_emit_mov_eax_imm32(e, insn_pc + (uint32_t)d->imm_u)) {
+      return false;
+    }
+    if (!rv32emu_jit_record_pc_reloc(artifact, code_ptr, auipc_imm_ptr)) {
       return false;
     }
     if (d->rd != 0u && !rv32emu_emit_mov_mem_rsi_eax(e, rd_off)) {
@@ -1140,56 +1852,30 @@ static bool rv32emu_jit_emit_one(rv32emu_x86_emit_t *e, const rv32emu_decoded_in
     return true;
   case 0x03: /* load */
   case 0x23: /* store */
-    return rv32emu_emit_jit_mem_helper(e, d, insn_pc, retired_before);
+    if (!rv32emu_emit_jit_mem_helper(e, helper_d, insn_pc, retired_before, &insn_pc_imm_ptr)) {
+      return false;
+    }
+    return rv32emu_jit_record_pc_reloc(artifact, code_ptr, insn_pc_imm_ptr);
   case 0x63: /* branch */
   case 0x67: /* jalr */
   case 0x6f: /* jal */
-    return rv32emu_emit_jit_cf_helper(e, d, insn_pc, retired_before);
+    if (!rv32emu_emit_jit_cf_helper(e, helper_d, insn_pc, retired_before, &insn_pc_imm_ptr)) {
+      return false;
+    }
+    return rv32emu_jit_record_pc_reloc(artifact, code_ptr, insn_pc_imm_ptr);
   default:
     return false;
   }
 }
 
-static uint32_t rv32emu_tb_line_next_pc_for_count(const rv32emu_tb_line_t *line, uint32_t count) {
-  if (line == NULL || line->count == 0u || count == 0u) {
-    return 0u;
+static void rv32emu_tb_line_clear_jit(rv32emu_tb_line_t *line, uint8_t state) {
+  if (line == NULL) {
+    return;
   }
-  if (count < line->count) {
-    return line->pcs[count];
-  }
-
-  {
-    uint32_t last_idx = count - 1u;
-    uint32_t step = (line->decoded[last_idx].insn_len == 2u) ? 2u : 4u;
-    return line->pcs[last_idx] + step;
-  }
-}
-
-static bool rv32emu_tb_try_compile_jit(rv32emu_tb_cache_t *cache, rv32emu_tb_line_t *line) {
-  uint32_t jit_count = 0u;
-  uint32_t max_jit_insns = RV32EMU_JIT_DEFAULT_MAX_INSNS_PER_BLOCK;
-  uint32_t min_prefix_insns = RV32EMU_JIT_DEFAULT_MIN_PREFIX_INSNS;
-  uint32_t epilogue_next_pc;
-  size_t code_bytes;
-  uint8_t *code_ptr;
-  rv32emu_x86_emit_t emit;
-
-  if (line == NULL || !line->valid || line->count == 0u) {
-    return false;
-  }
-  if (cache != NULL && cache->jit_max_block_insns != 0u) {
-    max_jit_insns = cache->jit_max_block_insns;
-  }
-  if (cache != NULL && cache->jit_min_prefix_insns != 0u) {
-    min_prefix_insns = cache->jit_min_prefix_insns;
-  }
-  if (min_prefix_insns > max_jit_insns) {
-    min_prefix_insns = max_jit_insns;
-  }
-
-  RV32EMU_JIT_STATS_INC(compile_attempts);
-
   line->jit_valid = false;
+  line->jit_state = state;
+  line->jit_async_wait = 0u;
+  line->jit_async_prefetched = false;
   line->jit_count = 0u;
   line->jit_fn = NULL;
   line->jit_map_count = 0u;
@@ -1197,10 +1883,151 @@ static bool rv32emu_tb_try_compile_jit(rv32emu_tb_cache_t *cache, rv32emu_tb_lin
   line->jit_chain_valid = false;
   line->jit_chain_pc = 0u;
   line->jit_chain_fn = NULL;
-  line->jit_tried = true;
+}
 
-  while (jit_count < line->count && jit_count < max_jit_insns) {
-    if (!rv32emu_jit_insn_supported(&line->decoded[jit_count])) {
+static void rv32emu_tb_line_apply_jit(rv32emu_tb_line_t *line,
+                                      const rv32emu_jit_compiled_artifact_t *artifact) {
+  if (line == NULL || artifact == NULL) {
+    return;
+  }
+
+  line->jit_valid = true;
+  line->jit_state = RV32EMU_JIT_STATE_READY;
+  line->jit_async_wait = 0u;
+  line->jit_async_prefetched = false;
+  line->jit_count = artifact->jit_count;
+  line->jit_fn = artifact->jit_fn;
+  line->jit_map_count = artifact->jit_map_count;
+  line->jit_code_size = artifact->jit_code_size;
+  memcpy(line->jit_host_off, artifact->jit_host_off, sizeof(line->jit_host_off));
+  line->jit_chain_valid = false;
+  line->jit_chain_pc = 0u;
+  line->jit_chain_fn = NULL;
+}
+
+static uint32_t rv32emu_tb_prefix_next_pc(const rv32emu_decoded_insn_t *decoded, const uint32_t *pcs,
+                                          uint8_t total_count, uint8_t prefix_count) {
+  uint32_t last_idx;
+  uint32_t step;
+
+  if (decoded == NULL || pcs == NULL || total_count == 0u || prefix_count == 0u) {
+    return 0u;
+  }
+  if (prefix_count < total_count) {
+    return pcs[prefix_count];
+  }
+
+  last_idx = (uint32_t)prefix_count - 1u;
+  step = (decoded[last_idx].insn_len == 2u) ? 2u : 4u;
+  return pcs[last_idx] + step;
+}
+
+static uint64_t rv32emu_tb_prefix_signature(const rv32emu_decoded_insn_t *decoded,
+                                            const uint32_t *pcs, uint8_t count) {
+  uint64_t h = UINT64_C(1469598103934665603);
+
+  if (decoded == NULL || pcs == NULL || count == 0u) {
+    return 0u;
+  }
+
+  for (uint8_t i = 0u; i < count; i++) {
+    h ^= (uint64_t)pcs[i];
+    h *= UINT64_C(1099511628211);
+    h ^= (uint64_t)decoded[i].raw;
+    h *= UINT64_C(1099511628211);
+    h ^= (uint64_t)decoded[i].insn_len;
+    h *= UINT64_C(1099511628211);
+  }
+
+  return (h == 0u) ? 1u : h;
+}
+
+static uint8_t rv32emu_tb_jit_supported_prefix(const rv32emu_decoded_insn_t *decoded, uint8_t count,
+                                               uint8_t max_jit_insns) {
+  uint8_t jit_count = 0u;
+
+  if (decoded == NULL || count == 0u || max_jit_insns == 0u) {
+    return 0u;
+  }
+
+  while (jit_count < count && jit_count < max_jit_insns) {
+    if (!rv32emu_jit_insn_supported(&decoded[jit_count])) {
+      break;
+    }
+    jit_count++;
+  }
+  return jit_count;
+}
+
+static bool rv32emu_tb_jit_template_key(const rv32emu_decoded_insn_t *decoded, const uint32_t *pcs,
+                                        uint8_t count, uint8_t max_jit_insns,
+                                        uint8_t min_prefix_insns, uint8_t *jit_count_out,
+                                        uint64_t *prefix_sig_out) {
+  uint8_t jit_count;
+  uint64_t prefix_sig;
+
+  if (decoded == NULL || pcs == NULL || count == 0u || jit_count_out == NULL || prefix_sig_out == NULL) {
+    return false;
+  }
+  if (max_jit_insns == 0u) {
+    max_jit_insns = RV32EMU_JIT_DEFAULT_MAX_INSNS_PER_BLOCK;
+  }
+  if (min_prefix_insns == 0u) {
+    min_prefix_insns = RV32EMU_JIT_DEFAULT_MIN_PREFIX_INSNS;
+  }
+  if (min_prefix_insns > max_jit_insns) {
+    min_prefix_insns = max_jit_insns;
+  }
+
+  jit_count = rv32emu_tb_jit_supported_prefix(decoded, count, max_jit_insns);
+  if (jit_count < min_prefix_insns) {
+    return false;
+  }
+
+  prefix_sig = rv32emu_tb_prefix_signature(decoded, pcs, jit_count);
+  if (prefix_sig == 0u) {
+    return false;
+  }
+
+  *jit_count_out = jit_count;
+  *prefix_sig_out = prefix_sig;
+  return true;
+}
+
+static bool rv32emu_tb_compile_jit_from_snapshot(const rv32emu_decoded_insn_t *decoded,
+                                                 const uint32_t *pcs, uint8_t count,
+                                                 rv32emu_tb_line_t *line_for_chain,
+                                                 uint32_t chain_from_pc,
+                                                 uint8_t max_jit_insns, uint8_t min_prefix_insns,
+                                                 rv32emu_jit_compiled_artifact_t *artifact_out) {
+  rv32emu_x86_emit_t emit;
+  rv32emu_decoded_insn_t *helper_snapshot;
+  const rv32emu_decoded_insn_t *helper_base = decoded;
+  uint8_t *epilogue_start;
+  uint32_t jit_count = 0u;
+  uint32_t epilogue_next_pc;
+  size_t code_bytes;
+  uint8_t *code_ptr;
+
+  if (decoded == NULL || pcs == NULL || count == 0u || artifact_out == NULL) {
+    return false;
+  }
+  if (max_jit_insns == 0u) {
+    max_jit_insns = RV32EMU_JIT_DEFAULT_MAX_INSNS_PER_BLOCK;
+  }
+  if (min_prefix_insns == 0u) {
+    min_prefix_insns = RV32EMU_JIT_DEFAULT_MIN_PREFIX_INSNS;
+  }
+  if (min_prefix_insns > max_jit_insns) {
+    min_prefix_insns = max_jit_insns;
+  }
+
+  RV32EMU_JIT_STATS_INC(compile_attempts);
+  artifact_out->pc_reloc_count = 0u;
+  artifact_out->base_start_pc = pcs[0];
+
+  while (jit_count < count && jit_count < max_jit_insns) {
+    if (!rv32emu_jit_insn_supported(&decoded[jit_count])) {
       break;
     }
     jit_count++;
@@ -1222,65 +2049,551 @@ static bool rv32emu_tb_try_compile_jit(rv32emu_tb_cache_t *cache, rv32emu_tb_lin
     return false;
   }
 
+  helper_snapshot = NULL;
+  if (line_for_chain != NULL) {
+    helper_base = line_for_chain->decoded;
+  } else {
+    helper_snapshot = (rv32emu_decoded_insn_t *)rv32emu_jit_alloc(
+        (size_t)jit_count * sizeof(rv32emu_decoded_insn_t));
+    if (helper_snapshot == NULL) {
+      RV32EMU_JIT_STATS_INC(compile_fail_alloc);
+      return false;
+    }
+    memcpy(helper_snapshot, decoded, (size_t)jit_count * sizeof(rv32emu_decoded_insn_t));
+    helper_base = helper_snapshot;
+  }
+
   emit.p = code_ptr;
   emit.end = code_ptr + code_bytes;
-
   if (!rv32emu_emit_prologue(&emit)) {
-    line->jit_valid = false;
-    line->jit_count = 0u;
-    line->jit_fn = NULL;
-    line->jit_map_count = 0u;
-    line->jit_code_size = 0u;
-    line->jit_chain_valid = false;
-    line->jit_chain_pc = 0u;
-    line->jit_chain_fn = NULL;
     RV32EMU_JIT_STATS_INC(compile_fail_emit);
     return false;
   }
 
   for (uint32_t i = 0u; i < jit_count; i++) {
-    line->jit_host_off[i] = (uint16_t)(uintptr_t)(emit.p - code_ptr);
-    if (!rv32emu_jit_emit_one(&emit, &line->decoded[i], line->pcs[i], i)) {
-      line->jit_valid = false;
-      line->jit_count = 0u;
-      line->jit_fn = NULL;
-      line->jit_map_count = 0u;
-      line->jit_code_size = 0u;
-      line->jit_chain_valid = false;
-      line->jit_chain_pc = 0u;
-      line->jit_chain_fn = NULL;
+    artifact_out->jit_host_off[i] = (uint16_t)(uintptr_t)(emit.p - code_ptr);
+    if (!rv32emu_jit_emit_one(&emit, &decoded[i], &helper_base[i], pcs[i], i, code_ptr,
+                              artifact_out)) {
       RV32EMU_JIT_STATS_INC(compile_fail_emit);
       return false;
     }
   }
 
-  epilogue_next_pc = rv32emu_tb_line_next_pc_for_count(line, jit_count);
-  if (!rv32emu_emit_epilogue(&emit, line, epilogue_next_pc, jit_count)) {
-    line->jit_valid = false;
-    line->jit_count = 0u;
-    line->jit_fn = NULL;
-    line->jit_map_count = 0u;
-    line->jit_code_size = 0u;
-    line->jit_chain_valid = false;
-    line->jit_chain_pc = 0u;
-    line->jit_chain_fn = NULL;
+  epilogue_next_pc = rv32emu_tb_prefix_next_pc(decoded, pcs, count, (uint8_t)jit_count);
+  epilogue_start = emit.p;
+  if (!rv32emu_emit_epilogue(&emit, line_for_chain, chain_from_pc, epilogue_next_pc, jit_count)) {
     RV32EMU_JIT_STATS_INC(compile_fail_emit);
     return false;
   }
+  if (line_for_chain == NULL && chain_from_pc != 0u && epilogue_start != NULL && code_ptr != NULL) {
+    uint32_t ep_off = (uint32_t)(uintptr_t)(epilogue_start - code_ptr);
+    if (ep_off + 46u <= (uint32_t)(uintptr_t)(emit.p - code_ptr) &&
+        ep_off + 42u <= UINT16_MAX) {
+      if (!rv32emu_jit_record_pc_reloc(artifact_out, code_ptr, code_ptr + ep_off + 5u) ||
+          !rv32emu_jit_record_pc_reloc(artifact_out, code_ptr, code_ptr + ep_off + 42u)) {
+        RV32EMU_JIT_STATS_INC(compile_fail_emit);
+        return false;
+      }
+    }
+  }
 
-  line->jit_valid = true;
-  line->jit_count = (uint8_t)jit_count;
-  line->jit_fn = (rv32emu_tb_jit_fn_t)(void *)code_ptr;
-  line->jit_map_count = (uint8_t)jit_count;
-  line->jit_code_size = (uint32_t)(uintptr_t)(emit.p - code_ptr);
-  line->jit_chain_valid = false;
-  line->jit_chain_pc = 0u;
-  line->jit_chain_fn = NULL;
+  artifact_out->jit_count = (uint8_t)jit_count;
+  artifact_out->jit_fn = (rv32emu_tb_jit_fn_t)(void *)code_ptr;
+  artifact_out->jit_map_count = (uint8_t)jit_count;
+  artifact_out->jit_code_size = (uint32_t)(uintptr_t)(emit.p - code_ptr);
+
   RV32EMU_JIT_STATS_INC(compile_success);
   RV32EMU_JIT_STATS_ADD(compile_prefix_insns, jit_count);
-  if (jit_count < line->count && jit_count == max_jit_insns) {
+  if (jit_count < count && jit_count == max_jit_insns) {
     RV32EMU_JIT_STATS_INC(compile_prefix_truncated);
   }
+  return true;
+}
+
+static bool rv32emu_tb_try_compile_jit(rv32emu_tb_cache_t *cache, rv32emu_tb_line_t *line) {
+  rv32emu_jit_compiled_artifact_t artifact;
+  uint8_t max_jit_insns = RV32EMU_JIT_DEFAULT_MAX_INSNS_PER_BLOCK;
+  uint8_t min_prefix_insns = RV32EMU_JIT_DEFAULT_MIN_PREFIX_INSNS;
+  uint8_t template_jit_count = 0u;
+  uint64_t template_sig = 0u;
+
+  if (line == NULL || !line->valid || line->count == 0u) {
+    return false;
+  }
+  if (cache != NULL && cache->jit_max_block_insns != 0u) {
+    max_jit_insns = cache->jit_max_block_insns;
+  }
+  if (cache != NULL && cache->jit_min_prefix_insns != 0u) {
+    min_prefix_insns = cache->jit_min_prefix_insns;
+  }
+
+  line->jit_tried = true;
+  rv32emu_tb_line_clear_jit(line, RV32EMU_JIT_STATE_NONE);
+  if (rv32emu_tb_jit_template_key(line->decoded, line->pcs, line->count, max_jit_insns,
+                                  min_prefix_insns, &template_jit_count, &template_sig) &&
+      rv32emu_jit_template_lookup(line->decoded, line->pcs, template_jit_count, template_sig,
+                                  &artifact)) {
+    rv32emu_tb_line_apply_jit(line, &artifact);
+    return true;
+  }
+  if (rv32emu_jit_pool_is_exhausted()) {
+    RV32EMU_JIT_STATS_INC(compile_fail_alloc);
+    line->jit_state = RV32EMU_JIT_STATE_FAILED;
+    return false;
+  }
+  if (!rv32emu_tb_compile_jit_from_snapshot(line->decoded, line->pcs, line->count, line,
+                                            line->start_pc, max_jit_insns, min_prefix_insns,
+                                            &artifact)) {
+    line->jit_state = RV32EMU_JIT_STATE_FAILED;
+    return false;
+  }
+
+  rv32emu_tb_line_apply_jit(line, &artifact);
+  return true;
+}
+
+static void *rv32emu_jit_async_worker_main(void *opaque) {
+  rv32emu_jit_async_mgr_t *mgr = (rv32emu_jit_async_mgr_t *)opaque;
+
+  for (;;) {
+    rv32emu_jit_async_job_t job;
+    rv32emu_jit_async_done_t done;
+    rv32emu_jit_compiled_artifact_t artifact;
+    uint8_t template_jit_count;
+    uint64_t template_sig;
+    bool template_key_ready;
+    bool ok;
+
+    if (mgr == NULL) {
+      return NULL;
+    }
+
+    if (pthread_mutex_lock(&mgr->lock) != 0) {
+      return NULL;
+    }
+    while (mgr->running && mgr->pending_count == 0u) {
+      (void)pthread_cond_wait(&mgr->pending_cv, &mgr->lock);
+    }
+    if (!mgr->running) {
+      (void)pthread_mutex_unlock(&mgr->lock);
+      return NULL;
+    }
+
+    job = mgr->pending[mgr->pending_head];
+    mgr->pending_head = (mgr->pending_head + 1u) % mgr->queue_cap;
+    mgr->pending_count--;
+    (void)pthread_mutex_unlock(&mgr->lock);
+
+    memset(&artifact, 0, sizeof(artifact));
+    template_jit_count = 0u;
+    template_sig = 0u;
+    template_key_ready = false;
+    if (job.portable) {
+      template_key_ready = rv32emu_tb_jit_template_key(
+          job.decoded, job.pcs, job.count, job.max_block_insns, job.min_prefix_insns,
+          &template_jit_count, &template_sig);
+      if (template_key_ready &&
+          rv32emu_jit_template_lookup(job.decoded, job.pcs, template_jit_count, template_sig,
+                                      &artifact)) {
+        ok = true;
+      } else if (template_key_ready &&
+                 rv32emu_jit_struct_template_lookup(job.decoded, template_jit_count, job.start_pc,
+                                                    &artifact)) {
+        ok = true;
+      } else {
+        ok = rv32emu_tb_compile_jit_from_snapshot(job.decoded, job.pcs, job.count, NULL,
+                                                  job.start_pc, job.max_block_insns,
+                                                  job.min_prefix_insns, &artifact);
+        if (ok && template_key_ready && artifact.jit_count == template_jit_count) {
+          rv32emu_jit_template_store(job.decoded, job.pcs, template_jit_count, template_sig,
+                                     &artifact);
+          rv32emu_jit_struct_template_store(job.decoded, template_jit_count, &artifact);
+        }
+      }
+    } else {
+      ok = rv32emu_tb_compile_jit_from_snapshot(job.decoded, job.pcs, job.count, job.line,
+                                                job.start_pc, job.max_block_insns,
+                                                job.min_prefix_insns, &artifact);
+    }
+    RV32EMU_JIT_STATS_INC(async_jobs_compiled);
+
+    done.line = job.line;
+    done.start_pc = job.start_pc;
+    done.generation = job.generation;
+    done.prefix_sig = 0u;
+    done.portable = job.portable;
+    done.success = ok;
+    if (ok) {
+      done.artifact = artifact;
+      if (job.portable) {
+        if (template_key_ready && template_jit_count == artifact.jit_count) {
+          done.prefix_sig = template_sig;
+        } else {
+          done.prefix_sig = rv32emu_tb_prefix_signature(job.decoded, job.pcs, artifact.jit_count);
+        }
+      }
+    } else {
+      memset(&done.artifact, 0, sizeof(done.artifact));
+    }
+
+    if (pthread_mutex_lock(&mgr->lock) != 0) {
+      return NULL;
+    }
+    if (mgr->done_count < mgr->queue_cap) {
+      mgr->done[mgr->done_tail] = done;
+      mgr->done_tail = (mgr->done_tail + 1u) % mgr->queue_cap;
+      mgr->done_count++;
+    } else {
+      RV32EMU_JIT_STATS_INC(async_jobs_dropped);
+    }
+    (void)pthread_mutex_unlock(&mgr->lock);
+  }
+}
+
+static void rv32emu_jit_async_init_once(void) {
+  rv32emu_jit_async_mgr_t *mgr = &g_rv32emu_jit_async_mgr;
+  uint32_t worker_count;
+  uint32_t queue_cap;
+
+  if (!rv32emu_tb_jit_async_enabled_from_env()) {
+    return;
+  }
+
+  worker_count = rv32emu_tb_jit_async_workers_from_env();
+  queue_cap = rv32emu_tb_jit_async_queue_from_env();
+  if (worker_count == 0u || queue_cap < 2u) {
+    return;
+  }
+
+  mgr->pending = (rv32emu_jit_async_job_t *)calloc((size_t)queue_cap, sizeof(*mgr->pending));
+  mgr->done = (rv32emu_jit_async_done_t *)calloc((size_t)queue_cap, sizeof(*mgr->done));
+  if (mgr->pending == NULL || mgr->done == NULL) {
+    free(mgr->pending);
+    free(mgr->done);
+    mgr->pending = NULL;
+    mgr->done = NULL;
+    return;
+  }
+
+  mgr->queue_cap = queue_cap;
+  mgr->pending_head = 0u;
+  mgr->pending_tail = 0u;
+  mgr->pending_count = 0u;
+  mgr->done_head = 0u;
+  mgr->done_tail = 0u;
+  mgr->done_count = 0u;
+  mgr->worker_count = 0u;
+  mgr->running = true;
+
+  for (uint32_t i = 0u; i < worker_count; i++) {
+    if (pthread_create(&mgr->workers[i], NULL, rv32emu_jit_async_worker_main, mgr) != 0) {
+      break;
+    }
+    mgr->worker_count++;
+  }
+
+  if (mgr->worker_count == 0u) {
+    mgr->running = false;
+    free(mgr->pending);
+    free(mgr->done);
+    mgr->pending = NULL;
+    mgr->done = NULL;
+    mgr->queue_cap = 0u;
+  }
+}
+
+static bool rv32emu_jit_async_running(void) {
+  rv32emu_jit_async_mgr_t *mgr = &g_rv32emu_jit_async_mgr;
+  (void)pthread_once(&mgr->once, rv32emu_jit_async_init_once);
+  return mgr->running && mgr->queue_cap != 0u && mgr->worker_count != 0u && mgr->pending != NULL &&
+         mgr->done != NULL;
+}
+
+static bool rv32emu_jit_async_enqueue_job(const rv32emu_jit_async_job_t *job) {
+  rv32emu_jit_async_mgr_t *mgr = &g_rv32emu_jit_async_mgr;
+  bool ok = false;
+
+  if (job == NULL || !rv32emu_jit_async_running()) {
+    return false;
+  }
+  if (pthread_mutex_lock(&mgr->lock) != 0) {
+    return false;
+  }
+  if (mgr->running && mgr->pending_count < mgr->queue_cap) {
+    mgr->pending[mgr->pending_tail] = *job;
+    mgr->pending_tail = (mgr->pending_tail + 1u) % mgr->queue_cap;
+    mgr->pending_count++;
+    ok = true;
+    (void)pthread_cond_signal(&mgr->pending_cv);
+  }
+  (void)pthread_mutex_unlock(&mgr->lock);
+
+  if (ok) {
+    RV32EMU_JIT_STATS_INC(async_jobs_enqueued);
+  } else {
+    RV32EMU_JIT_STATS_INC(async_jobs_dropped);
+  }
+  return ok;
+}
+
+static bool rv32emu_jit_async_pop_done(rv32emu_jit_async_done_t *done) {
+  rv32emu_jit_async_mgr_t *mgr = &g_rv32emu_jit_async_mgr;
+
+  if (done == NULL || !rv32emu_jit_async_running()) {
+    return false;
+  }
+  if (pthread_mutex_lock(&mgr->lock) != 0) {
+    return false;
+  }
+  if (!mgr->running || mgr->done_count == 0u) {
+    (void)pthread_mutex_unlock(&mgr->lock);
+    return false;
+  }
+
+  *done = mgr->done[mgr->done_head];
+  mgr->done_head = (mgr->done_head + 1u) % mgr->queue_cap;
+  mgr->done_count--;
+  (void)pthread_mutex_unlock(&mgr->lock);
+  return true;
+}
+
+static bool rv32emu_jit_async_is_busy(uint8_t busy_pct) {
+  rv32emu_jit_async_mgr_t *mgr = &g_rv32emu_jit_async_mgr;
+  uint32_t cap = 0u;
+  uint32_t pending = 0u;
+  uint32_t done = 0u;
+  uint32_t depth = 0u;
+
+  if (busy_pct == 0u || busy_pct > 100u || !rv32emu_jit_async_running()) {
+    return false;
+  }
+  if (pthread_mutex_lock(&mgr->lock) != 0) {
+    return false;
+  }
+  if (mgr->running && mgr->queue_cap != 0u) {
+    cap = mgr->queue_cap;
+    pending = mgr->pending_count;
+    done = mgr->done_count;
+  }
+  (void)pthread_mutex_unlock(&mgr->lock);
+
+  if (cap == 0u) {
+    return false;
+  }
+
+  depth = pending + done;
+  return depth * 100u >= cap * (uint32_t)busy_pct;
+}
+
+static bool rv32emu_tb_jit_async_supported(rv32emu_machine_t *m, rv32emu_tb_cache_t *cache) {
+  if (m == NULL || cache == NULL || !cache->jit_async_enabled) {
+    return false;
+  }
+  if (m->hart_count != 1u || m->threaded_exec_active) {
+    return false;
+  }
+  return rv32emu_jit_async_running();
+}
+
+typedef enum {
+  RV32EMU_ASYNC_APPLY_DIRECT = 0,
+  RV32EMU_ASYNC_APPLY_RECYCLED = 1,
+  RV32EMU_ASYNC_STALE_NONPORTABLE = 2,
+  RV32EMU_ASYNC_STALE_NOT_SUCCESS = 3,
+  RV32EMU_ASYNC_STALE_LOOKUP_MISS = 4,
+  RV32EMU_ASYNC_STALE_STATE_MISMATCH = 5,
+  RV32EMU_ASYNC_STALE_SIG_MISMATCH = 6,
+} rv32emu_jit_async_apply_result_t;
+
+static rv32emu_jit_async_apply_result_t
+rv32emu_tb_try_apply_async_done(rv32emu_tb_cache_t *cache, const rv32emu_jit_async_done_t *done) {
+  rv32emu_tb_line_t *line;
+
+  if (cache == NULL || done == NULL) {
+    return RV32EMU_ASYNC_STALE_LOOKUP_MISS;
+  }
+
+  line = done->line;
+  if (line != NULL && line->jit_generation == done->generation &&
+      line->jit_state == RV32EMU_JIT_STATE_QUEUED) {
+    line->jit_tried = true;
+    if (done->success) {
+      rv32emu_tb_line_apply_jit(line, &done->artifact);
+    } else {
+      rv32emu_tb_line_clear_jit(line, RV32EMU_JIT_STATE_FAILED);
+    }
+    return RV32EMU_ASYNC_APPLY_DIRECT;
+  }
+
+  if (!done->portable) {
+    return RV32EMU_ASYNC_STALE_NONPORTABLE;
+  }
+  if (!done->success || done->artifact.jit_count == 0u || done->prefix_sig == 0u) {
+    return RV32EMU_ASYNC_STALE_NOT_SUCCESS;
+  }
+
+  line = rv32emu_tb_find_cached_line(cache, done->start_pc);
+  if (line == NULL || !line->valid || line->start_pc != done->start_pc ||
+      line->count < done->artifact.jit_count) {
+    return RV32EMU_ASYNC_STALE_LOOKUP_MISS;
+  }
+  if (line->jit_state != RV32EMU_JIT_STATE_NONE && line->jit_state != RV32EMU_JIT_STATE_QUEUED) {
+    return RV32EMU_ASYNC_STALE_STATE_MISMATCH;
+  }
+  if (rv32emu_tb_prefix_signature(line->decoded, line->pcs, done->artifact.jit_count) !=
+      done->prefix_sig) {
+    return RV32EMU_ASYNC_STALE_SIG_MISMATCH;
+  }
+
+  line->jit_tried = true;
+  rv32emu_tb_line_apply_jit(line, &done->artifact);
+  return RV32EMU_ASYNC_APPLY_RECYCLED;
+}
+
+static void rv32emu_tb_jit_async_drain(rv32emu_machine_t *m, rv32emu_tb_cache_t *cache) {
+  rv32emu_jit_async_apply_result_t apply_result;
+  rv32emu_jit_async_done_t done;
+
+  if (m == NULL || cache == NULL || !rv32emu_jit_async_running()) {
+    return;
+  }
+
+  while (rv32emu_jit_async_pop_done(&done)) {
+    apply_result = rv32emu_tb_try_apply_async_done(cache, &done);
+    if (apply_result == RV32EMU_ASYNC_APPLY_DIRECT) {
+      RV32EMU_JIT_STATS_INC(async_results_applied);
+      RV32EMU_JIT_STATS_INC(async_applied_direct);
+      continue;
+    }
+    if (apply_result == RV32EMU_ASYNC_APPLY_RECYCLED) {
+      RV32EMU_JIT_STATS_INC(async_results_applied);
+      RV32EMU_JIT_STATS_INC(async_applied_recycled);
+      continue;
+    }
+
+    if (apply_result == RV32EMU_ASYNC_STALE_NONPORTABLE) {
+      RV32EMU_JIT_STATS_INC(async_stale_nonportable);
+    } else if (apply_result == RV32EMU_ASYNC_STALE_NOT_SUCCESS) {
+      RV32EMU_JIT_STATS_INC(async_stale_not_success);
+    } else if (apply_result == RV32EMU_ASYNC_STALE_LOOKUP_MISS) {
+      RV32EMU_JIT_STATS_INC(async_stale_lookup_miss);
+    } else if (apply_result == RV32EMU_ASYNC_STALE_STATE_MISMATCH) {
+      RV32EMU_JIT_STATS_INC(async_stale_state_mismatch);
+    } else if (apply_result == RV32EMU_ASYNC_STALE_SIG_MISMATCH) {
+      RV32EMU_JIT_STATS_INC(async_stale_sig_mismatch);
+    }
+    {
+      RV32EMU_JIT_STATS_INC(async_results_stale);
+    }
+  }
+}
+
+static bool rv32emu_tb_jit_async_block_has_helpers(const rv32emu_tb_cache_t *cache,
+                                                   const rv32emu_tb_line_t *line) {
+  uint8_t max_jit_insns = RV32EMU_JIT_DEFAULT_MAX_INSNS_PER_BLOCK;
+
+  if (cache == NULL || line == NULL || !line->valid || line->count == 0u) {
+    return true;
+  }
+  if (cache->jit_max_block_insns != 0u) {
+    max_jit_insns = cache->jit_max_block_insns;
+  }
+
+  for (uint8_t i = 0u; i < line->count && i < max_jit_insns; i++) {
+    uint32_t opcode;
+
+    if (!rv32emu_jit_insn_supported(&line->decoded[i])) {
+      break;
+    }
+    opcode = line->decoded[i].opcode;
+    if (opcode == 0x03u || opcode == 0x23u || opcode == 0x63u || opcode == 0x67u ||
+        opcode == 0x6fu) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static void rv32emu_tb_async_force_sync_compile(rv32emu_tb_cache_t *cache, rv32emu_tb_line_t *line) {
+  if (cache == NULL || line == NULL || !line->valid || line->count == 0u) {
+    return;
+  }
+  if (rv32emu_jit_pool_is_exhausted()) {
+    line->jit_tried = true;
+    rv32emu_tb_line_clear_jit(line, RV32EMU_JIT_STATE_FAILED);
+    RV32EMU_JIT_STATS_INC(async_sync_fallbacks);
+    RV32EMU_JIT_STATS_INC(compile_fail_alloc);
+    return;
+  }
+  line->jit_generation = rv32emu_tb_next_jit_generation();
+  line->jit_tried = false;
+  rv32emu_tb_line_clear_jit(line, RV32EMU_JIT_STATE_NONE);
+  RV32EMU_JIT_STATS_INC(async_sync_fallbacks);
+  (void)rv32emu_tb_try_compile_jit(cache, line);
+}
+
+static bool rv32emu_tb_queue_jit_compile_async(rv32emu_tb_cache_t *cache, rv32emu_tb_line_t *line,
+                                               bool prefetch_hint) {
+  rv32emu_jit_async_job_t job;
+  rv32emu_jit_compiled_artifact_t artifact;
+  uint8_t template_jit_count = 0u;
+  uint64_t template_sig = 0u;
+
+  if (cache == NULL || line == NULL || !line->valid || line->count == 0u ||
+      line->jit_state != RV32EMU_JIT_STATE_NONE) {
+    return false;
+  }
+  if (cache->jit_async_recycle && cache->jit_template_fast_apply &&
+      rv32emu_tb_jit_template_key(line->decoded, line->pcs, line->count, cache->jit_max_block_insns,
+                                  cache->jit_min_prefix_insns, &template_jit_count,
+                                  &template_sig) &&
+      rv32emu_jit_template_lookup(line->decoded, line->pcs, template_jit_count, template_sig,
+                                  &artifact)) {
+    line->jit_tried = true;
+    rv32emu_tb_line_apply_jit(line, &artifact);
+    RV32EMU_JIT_STATS_INC(async_template_applied);
+    return true;
+  }
+  if (rv32emu_jit_pool_is_exhausted()) {
+    line->jit_tried = true;
+    rv32emu_tb_line_clear_jit(line, RV32EMU_JIT_STATE_FAILED);
+    RV32EMU_JIT_STATS_INC(compile_fail_alloc);
+    return false;
+  }
+  if (cache->jit_async_busy_pct != 0u && rv32emu_jit_async_is_busy(cache->jit_async_busy_pct)) {
+    if (prefetch_hint) {
+      RV32EMU_JIT_STATS_INC(async_jobs_dropped);
+      return false;
+    }
+    if (!cache->jit_async_foreground_sync) {
+      return false;
+    }
+  }
+  if (!cache->jit_async_allow_helpers && rv32emu_tb_jit_async_block_has_helpers(cache, line)) {
+    line->jit_tried = true;
+    rv32emu_tb_line_clear_jit(line, RV32EMU_JIT_STATE_FAILED);
+    RV32EMU_JIT_STATS_INC(compile_fail_unsupported_prefix);
+    return false;
+  }
+
+  memset(&job, 0, sizeof(job));
+  job.line = line;
+  job.start_pc = line->start_pc;
+  job.generation = line->jit_generation;
+  job.portable = cache->jit_async_recycle;
+  job.count = line->count;
+  job.max_block_insns = cache->jit_max_block_insns;
+  job.min_prefix_insns = cache->jit_min_prefix_insns;
+  memcpy(job.pcs, line->pcs, sizeof(job.pcs));
+  memcpy(job.decoded, line->decoded, sizeof(job.decoded));
+
+  if (!rv32emu_jit_async_enqueue_job(&job)) {
+    return false;
+  }
+
+  line->jit_tried = true;
+  rv32emu_tb_line_clear_jit(line, RV32EMU_JIT_STATE_QUEUED);
   return true;
 }
 #else
@@ -1288,6 +2601,9 @@ static bool rv32emu_tb_try_compile_jit(rv32emu_tb_cache_t *cache, rv32emu_tb_lin
   (void)cache;
   if (line != NULL) {
     line->jit_tried = true;
+    line->jit_state = RV32EMU_JIT_STATE_FAILED;
+    line->jit_async_wait = 0u;
+    line->jit_async_prefetched = false;
     line->jit_valid = false;
     line->jit_count = 0u;
     line->jit_fn = NULL;
@@ -1310,14 +2626,33 @@ void rv32emu_tb_cache_reset(rv32emu_tb_cache_t *cache) {
   cache->jit_max_block_insns = rv32emu_tb_max_block_insns_from_env();
   cache->jit_min_prefix_insns = rv32emu_tb_min_prefix_insns_from_env();
   cache->jit_chain_max_insns = rv32emu_tb_chain_max_insns_from_env();
+  cache->jit_async_enabled = rv32emu_tb_jit_async_enabled_from_env();
+  cache->jit_async_foreground_sync = rv32emu_tb_jit_async_foreground_sync_from_env();
+  cache->jit_async_prefetch_enabled = rv32emu_tb_jit_async_prefetch_enabled_from_env();
+  cache->jit_async_allow_helpers = rv32emu_tb_jit_async_allow_helpers_from_env();
+  cache->jit_async_redecode_helpers = rv32emu_tb_jit_async_redecode_helpers_from_env();
+  cache->jit_async_recycle = rv32emu_tb_jit_async_recycle_from_env();
+  cache->jit_template_fast_apply = rv32emu_tb_jit_template_fast_apply_from_env();
+  cache->jit_async_sync_fallback_spins = rv32emu_tb_jit_async_sync_fallback_spins_from_env();
+  cache->jit_async_busy_pct = rv32emu_tb_jit_async_busy_pct_from_env();
+  cache->jit_async_hot_discount = rv32emu_tb_jit_async_hot_discount_from_env();
+  cache->jit_async_hot_bonus = rv32emu_tb_jit_async_hot_bonus_from_env();
+  cache->jit_async_drain_ticks = 0u;
   for (uint32_t i = 0u; i < RV32EMU_TB_LINES; i++) {
+    cache->repl_next_way[i] = 0u;
+  }
+  for (uint32_t i = 0u; i < RV32EMU_TB_TOTAL_LINES; i++) {
     cache->lines[i].valid = false;
     cache->lines[i].start_pc = 0u;
     cache->lines[i].count = 0u;
     cache->lines[i].jit_hotness = 0u;
     cache->lines[i].jit_tried = false;
     cache->lines[i].jit_valid = false;
+    cache->lines[i].jit_state = RV32EMU_JIT_STATE_NONE;
+    cache->lines[i].jit_async_wait = 0u;
+    cache->lines[i].jit_async_prefetched = false;
     cache->lines[i].jit_count = 0u;
+    cache->lines[i].jit_generation = rv32emu_tb_next_jit_generation();
     cache->lines[i].jit_fn = NULL;
     cache->lines[i].jit_map_count = 0u;
     cache->lines[i].jit_code_size = 0u;
@@ -1340,7 +2675,11 @@ static bool rv32emu_tb_build_line(rv32emu_machine_t *m, rv32emu_tb_line_t *line,
   line->jit_hotness = 0u;
   line->jit_tried = false;
   line->jit_valid = false;
+  line->jit_state = RV32EMU_JIT_STATE_NONE;
+  line->jit_async_wait = 0u;
+  line->jit_async_prefetched = false;
   line->jit_count = 0u;
+  line->jit_generation = rv32emu_tb_next_jit_generation();
   line->jit_fn = NULL;
   line->jit_map_count = 0u;
   line->jit_code_size = 0u;
@@ -1386,19 +2725,26 @@ static bool rv32emu_tb_build_line(rv32emu_machine_t *m, rv32emu_tb_line_t *line,
 
 static rv32emu_tb_line_t *rv32emu_tb_lookup_or_build(rv32emu_machine_t *m, rv32emu_tb_cache_t *cache,
                                                       uint32_t pc) {
-  uint32_t idx;
+  uint32_t set_idx;
   rv32emu_tb_line_t *line;
 
   if (m == NULL || cache == NULL) {
     return NULL;
   }
 
-  idx = rv32emu_tb_index(pc);
-  line = &cache->lines[idx];
-  if (line->valid && line->start_pc == pc) {
+  line = rv32emu_tb_find_cached_line(cache, pc);
+  if (line != NULL) {
     return line;
   }
 
+  set_idx = rv32emu_tb_index(pc);
+  line = rv32emu_tb_pick_victim_line(cache, set_idx);
+  if (line == NULL) {
+    return NULL;
+  }
+  if (line->valid && line->jit_state == RV32EMU_JIT_STATE_QUEUED) {
+    RV32EMU_JIT_STATS_INC(async_evict_queued);
+  }
   if (!rv32emu_tb_build_line(m, line, pc)) {
     return NULL;
   }
@@ -1406,14 +2752,180 @@ static rv32emu_tb_line_t *rv32emu_tb_lookup_or_build(rv32emu_machine_t *m, rv32e
 }
 
 #if defined(__x86_64__)
+static bool rv32emu_tb_line_jit_ready(const rv32emu_tb_line_t *line) {
+  return line != NULL && line->jit_state == RV32EMU_JIT_STATE_READY && line->jit_valid &&
+         line->jit_count != 0u && line->jit_fn != NULL;
+}
+
+static uint32_t rv32emu_tb_resolve_hot_threshold(const rv32emu_tb_cache_t *cache) {
+  uint32_t hot_threshold = RV32EMU_JIT_DEFAULT_HOT_THRESHOLD;
+
+  if (cache != NULL && cache->jit_hot_threshold != 0u) {
+    hot_threshold = (uint32_t)cache->jit_hot_threshold;
+  }
+
+  return hot_threshold;
+}
+
+static uint32_t rv32emu_tb_jit_compile_threshold(const rv32emu_tb_cache_t *cache,
+                                                 bool async_compile) {
+  uint32_t threshold = rv32emu_tb_resolve_hot_threshold(cache);
+
+  if (async_compile && cache != NULL) {
+    if (cache->jit_async_hot_discount >= threshold) {
+      threshold = 1u;
+    } else {
+      threshold -= (uint32_t)cache->jit_async_hot_discount;
+      if (threshold == 0u) {
+        threshold = 1u;
+      }
+    }
+    if (cache->jit_async_hot_bonus != 0u) {
+      if ((uint32_t)cache->jit_async_hot_bonus >= 255u - threshold) {
+        threshold = 255u;
+      } else {
+        threshold += (uint32_t)cache->jit_async_hot_bonus;
+      }
+    }
+  }
+
+  return threshold;
+}
+
+static bool rv32emu_tb_jit_prefix_matches_guest(rv32emu_machine_t *m, const rv32emu_tb_line_t *line) {
+  if (m == NULL || line == NULL || !line->jit_valid || line->jit_count == 0u ||
+      line->jit_count > line->count) {
+    return false;
+  }
+
+  for (uint8_t i = 0u; i < line->jit_count; i++) {
+    uint8_t len = (line->decoded[i].insn_len == 2u) ? 2u : 4u;
+    uint32_t raw = 0u;
+
+    if (!rv32emu_virt_read(m, line->pcs[i], len, RV32EMU_ACC_FETCH, &raw)) {
+      return false;
+    }
+    if (len == 2u) {
+      if ((line->decoded[i].raw & 0xffffu) != (raw & 0xffffu)) {
+        return false;
+      }
+    } else if (line->decoded[i].raw != raw) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+static uint8_t rv32emu_tb_collect_static_successors(const rv32emu_tb_line_t *line,
+                                                    uint32_t succ_out[2]) {
+  const rv32emu_decoded_insn_t *tail;
+  uint32_t tail_pc;
+  uint32_t tail_step;
+  uint8_t count = 0u;
+
+  if (line == NULL || succ_out == NULL || !line->valid || line->count == 0u) {
+    return 0u;
+  }
+
+  tail = &line->decoded[line->count - 1u];
+  tail_pc = line->pcs[line->count - 1u];
+  tail_step = (tail->insn_len == 2u) ? 2u : 4u;
+
+  switch (tail->opcode) {
+  case 0x63: { /* branch */
+    uint32_t fallthrough = tail_pc + tail_step;
+    uint32_t target = tail_pc + (uint32_t)tail->imm_b;
+    succ_out[count++] = fallthrough;
+    if (target != fallthrough) {
+      succ_out[count++] = target;
+    }
+    break;
+  }
+  case 0x6f: /* jal */
+    succ_out[count++] = tail_pc + (uint32_t)tail->imm_j;
+    break;
+  case 0x67: /* jalr: dynamic target, skip speculative prefetch */
+  case 0x73: /* system: trap/return side effects, skip */
+    break;
+  default:
+    succ_out[count++] = tail_pc + tail_step;
+    break;
+  }
+
+  return count;
+}
+
+static void rv32emu_tb_async_prefetch_successors(rv32emu_machine_t *m, rv32emu_tb_cache_t *cache,
+                                                 rv32emu_tb_line_t *line) {
+  uint32_t succ[2] = {0u, 0u};
+  uint8_t succ_count;
+  uint32_t prefetch_threshold;
+
+  if (m == NULL || cache == NULL || line == NULL || !cache->jit_async_prefetch_enabled) {
+    return;
+  }
+  if (!rv32emu_tb_line_jit_ready(line)) {
+    return;
+  }
+
+  /* Probe successors every other hit to keep prefetch overhead bounded. */
+  if (line->jit_async_prefetched) {
+    line->jit_async_prefetched = false;
+    return;
+  }
+  line->jit_async_prefetched = true;
+  succ_count = rv32emu_tb_collect_static_successors(line, succ);
+  prefetch_threshold =
+      rv32emu_tb_jit_compile_threshold(cache, !cache->jit_async_foreground_sync);
+
+  for (uint8_t i = 0u; i < succ_count; i++) {
+    rv32emu_tb_line_t *next_line;
+    uint32_t target = succ[i];
+
+    if ((target & 1u) != 0u) {
+      continue;
+    }
+    next_line = rv32emu_tb_lookup_or_build(m, cache, target);
+    if (next_line == NULL || !next_line->valid || next_line->start_pc != target ||
+        rv32emu_tb_line_jit_ready(next_line) || next_line->jit_state != RV32EMU_JIT_STATE_NONE) {
+      continue;
+    }
+
+    if (next_line->jit_hotness < 255u) {
+      next_line->jit_hotness++;
+    }
+    if ((uint32_t)next_line->jit_hotness < prefetch_threshold) {
+      continue;
+    }
+
+    (void)rv32emu_tb_queue_jit_compile_async(cache, next_line, true);
+  }
+}
+
 static bool rv32emu_tb_get_ready_jit_line(rv32emu_machine_t *m, rv32emu_tb_cache_t *cache,
                                           uint32_t pc, uint64_t budget,
                                           rv32emu_tb_line_t **line_out) {
   rv32emu_tb_line_t *line;
-  uint32_t hot_threshold;
+  bool async_runtime_ok;
+  bool async_compile_ok;
+  uint32_t compile_threshold;
 
   if (m == NULL || cache == NULL || line_out == NULL || budget == 0u) {
     return false;
+  }
+
+  async_runtime_ok = false;
+  async_compile_ok = false;
+  if (!cache->jit_async_foreground_sync && rv32emu_tb_jit_async_supported(m, cache)) {
+    async_runtime_ok = true;
+    async_compile_ok = true;
+    if (cache->jit_async_drain_ticks + 1u >= RV32EMU_JIT_DEFAULT_ASYNC_DRAIN_INTERVAL) {
+      cache->jit_async_drain_ticks = 0u;
+      rv32emu_tb_jit_async_drain(m, cache);
+    } else {
+      cache->jit_async_drain_ticks++;
+    }
   }
 
   line = rv32emu_tb_lookup_or_build(m, cache, pc);
@@ -1421,24 +2933,53 @@ static bool rv32emu_tb_get_ready_jit_line(rv32emu_machine_t *m, rv32emu_tb_cache
     return false;
   }
 
-  if (!line->jit_valid || line->jit_count == 0u || line->jit_fn == NULL) {
-    if (!line->jit_tried) {
-      if (line->jit_hotness < 255u) {
-        line->jit_hotness++;
-      }
+  if (!rv32emu_tb_line_jit_ready(line) && line->jit_state == RV32EMU_JIT_STATE_NONE) {
+    if (line->jit_hotness < 255u) {
+      line->jit_hotness++;
+    }
 
-      hot_threshold = (uint32_t)cache->jit_hot_threshold;
-      if (hot_threshold == 0u) {
-        hot_threshold = RV32EMU_JIT_DEFAULT_HOT_THRESHOLD;
-      }
-      if (line->jit_hotness >= hot_threshold) {
+    compile_threshold = rv32emu_tb_jit_compile_threshold(cache, async_compile_ok);
+    if ((uint32_t)line->jit_hotness >= compile_threshold) {
+      if (async_compile_ok) {
+        if (!rv32emu_tb_queue_jit_compile_async(cache, line, false) &&
+            line->jit_state == RV32EMU_JIT_STATE_NONE && !rv32emu_jit_pool_is_exhausted()) {
+          rv32emu_tb_async_force_sync_compile(cache, line);
+        }
+      } else {
         (void)rv32emu_tb_try_compile_jit(cache, line);
       }
     }
   }
 
-  if (!line->jit_valid || line->jit_count == 0u || line->jit_fn == NULL) {
+  if (async_runtime_ok && line->jit_state == RV32EMU_JIT_STATE_QUEUED) {
+    cache->jit_async_drain_ticks = 0u;
+    rv32emu_tb_jit_async_drain(m, cache);
+    if (line->jit_state == RV32EMU_JIT_STATE_QUEUED && cache->jit_async_sync_fallback_spins != 0u) {
+      if (line->jit_async_wait < 255u) {
+        line->jit_async_wait++;
+      }
+      if ((cache->jit_async_busy_pct != 0u && line->jit_async_wait != 0u &&
+           rv32emu_jit_async_is_busy(cache->jit_async_busy_pct)) ||
+          line->jit_async_wait >= cache->jit_async_sync_fallback_spins) {
+        rv32emu_tb_async_force_sync_compile(cache, line);
+      }
+    }
+  }
+
+  if (!rv32emu_tb_line_jit_ready(line)) {
     return false;
+  }
+  if (async_runtime_ok && !rv32emu_tb_jit_prefix_matches_guest(m, line)) {
+    line->valid = false;
+    line->jit_hotness = 0u;
+    line->jit_tried = false;
+    line->jit_generation = rv32emu_tb_next_jit_generation();
+    rv32emu_tb_line_clear_jit(line, RV32EMU_JIT_STATE_NONE);
+    RV32EMU_JIT_STATS_INC(async_results_stale);
+    return false;
+  }
+  if (async_runtime_ok) {
+    rv32emu_tb_async_prefetch_successors(m, cache, line);
   }
   if ((uint64_t)line->jit_count > budget) {
     return false;
@@ -1451,7 +2992,6 @@ static bool rv32emu_tb_get_ready_jit_line(rv32emu_machine_t *m, rv32emu_tb_cache
 static rv32emu_tb_line_t *rv32emu_tb_try_cached_chain(rv32emu_tb_cache_t *cache,
                                                        rv32emu_tb_line_t *from, uint32_t next_pc,
                                                        uint64_t budget) {
-  uint32_t idx;
   rv32emu_tb_line_t *line;
 
   if (cache == NULL || from == NULL || !from->jit_chain_valid || from->jit_chain_fn == NULL ||
@@ -1459,10 +2999,8 @@ static rv32emu_tb_line_t *rv32emu_tb_try_cached_chain(rv32emu_tb_cache_t *cache,
     return NULL;
   }
 
-  idx = rv32emu_tb_index(next_pc);
-  line = &cache->lines[idx];
-  if (!line->valid || line->start_pc != next_pc || !line->jit_valid || line->jit_count == 0u ||
-      line->jit_fn == NULL || line->jit_fn != from->jit_chain_fn ||
+  line = rv32emu_tb_find_cached_line(cache, next_pc);
+  if (line == NULL || !rv32emu_tb_line_jit_ready(line) || line->jit_fn != from->jit_chain_fn ||
       (uint64_t)line->jit_count > budget) {
     from->jit_chain_valid = false;
     from->jit_chain_pc = 0u;
@@ -1474,7 +3012,7 @@ static rv32emu_tb_line_t *rv32emu_tb_try_cached_chain(rv32emu_tb_cache_t *cache,
 }
 
 static void rv32emu_tb_cache_chain(rv32emu_tb_line_t *from, rv32emu_tb_line_t *to) {
-  if (from == NULL || to == NULL || to->jit_fn == NULL || to->jit_count == 0u) {
+  if (from == NULL || to == NULL || !rv32emu_tb_line_jit_ready(to)) {
     return;
   }
   from->jit_chain_valid = true;
@@ -1517,6 +3055,22 @@ static rv32emu_tb_jit_fn_t rv32emu_jit_chain_next(rv32emu_machine_t *m, rv32emu_
   }
 
   return next_line->jit_fn;
+}
+
+static rv32emu_tb_jit_fn_t rv32emu_jit_chain_next_pc(rv32emu_machine_t *m, rv32emu_cpu_t *cpu,
+                                                      uint32_t from_pc) {
+  rv32emu_tb_cache_t *cache = g_rv32emu_jit_tls_cache;
+  rv32emu_tb_line_t *from;
+
+  if (m == NULL || cpu == NULL || cache == NULL || from_pc == 0u) {
+    return NULL;
+  }
+  from = rv32emu_tb_lookup_or_build(m, cache, from_pc);
+  if (from == NULL || from->start_pc != from_pc || !rv32emu_tb_line_jit_ready(from)) {
+    return NULL;
+  }
+
+  return rv32emu_jit_chain_next(m, cpu, from);
 }
 #endif
 
@@ -1626,6 +3180,10 @@ void rv32emu_jit_stats_reset(void) {
   atomic_store_explicit(&g_rv32emu_jit_stats.dispatch_noprogress, 0u, memory_order_relaxed);
   atomic_store_explicit(&g_rv32emu_jit_stats.compile_attempts, 0u, memory_order_relaxed);
   atomic_store_explicit(&g_rv32emu_jit_stats.compile_success, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.compile_template_hits, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.compile_template_stores, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.compile_struct_hits, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.compile_struct_stores, 0u, memory_order_relaxed);
   atomic_store_explicit(&g_rv32emu_jit_stats.compile_prefix_insns, 0u, memory_order_relaxed);
   atomic_store_explicit(&g_rv32emu_jit_stats.compile_prefix_truncated, 0u, memory_order_relaxed);
   atomic_store_explicit(&g_rv32emu_jit_stats.compile_fail_too_short, 0u, memory_order_relaxed);
@@ -1637,6 +3195,21 @@ void rv32emu_jit_stats_reset(void) {
   atomic_store_explicit(&g_rv32emu_jit_stats.helper_cf_calls, 0u, memory_order_relaxed);
   atomic_store_explicit(&g_rv32emu_jit_stats.chain_hits, 0u, memory_order_relaxed);
   atomic_store_explicit(&g_rv32emu_jit_stats.chain_misses, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.async_jobs_enqueued, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.async_jobs_dropped, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.async_jobs_compiled, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.async_results_applied, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.async_results_stale, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.async_template_applied, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.async_applied_direct, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.async_applied_recycled, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.async_stale_nonportable, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.async_stale_not_success, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.async_stale_lookup_miss, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.async_stale_state_mismatch, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.async_stale_sig_mismatch, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.async_evict_queued, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.async_sync_fallbacks, 0u, memory_order_relaxed);
 }
 
 void rv32emu_jit_stats_dump(uint64_t executed) {
@@ -1649,6 +3222,10 @@ void rv32emu_jit_stats_dump(uint64_t executed) {
   uint64_t dispatch_noprogress;
   uint64_t compile_attempts;
   uint64_t compile_success;
+  uint64_t compile_template_hits;
+  uint64_t compile_template_stores;
+  uint64_t compile_struct_hits;
+  uint64_t compile_struct_stores;
   uint64_t compile_prefix_insns;
   uint64_t compile_prefix_truncated;
   uint64_t compile_fail_too_short;
@@ -1659,9 +3236,32 @@ void rv32emu_jit_stats_dump(uint64_t executed) {
   uint64_t helper_cf_calls;
   uint64_t chain_hits;
   uint64_t chain_misses;
+  uint64_t async_jobs_enqueued;
+  uint64_t async_jobs_dropped;
+  uint64_t async_jobs_compiled;
+  uint64_t async_results_applied;
+  uint64_t async_results_stale;
+  uint64_t async_template_applied;
+  uint64_t async_applied_direct;
+  uint64_t async_applied_recycled;
+  uint64_t async_stale_nonportable;
+  uint64_t async_stale_not_success;
+  uint64_t async_stale_lookup_miss;
+  uint64_t async_stale_state_mismatch;
+  uint64_t async_stale_sig_mismatch;
+  uint64_t async_evict_queued;
+  uint64_t async_sync_fallbacks;
   uint32_t max_block_insns;
   uint32_t min_prefix_insns;
   uint32_t chain_max_insns;
+  uint32_t async_foreground_sync;
+  uint32_t async_prefetch;
+  uint32_t async_recycle;
+  uint32_t template_fast_apply;
+  uint32_t async_sync_fallback_spins;
+  uint32_t async_busy_pct;
+  uint32_t async_hot_discount;
+  uint32_t async_hot_bonus;
   uint32_t hot_threshold;
   uint32_t pool_mb;
   double compile_hit_rate = 0.0;
@@ -1688,6 +3288,14 @@ void rv32emu_jit_stats_dump(uint64_t executed) {
   compile_attempts =
       atomic_load_explicit(&g_rv32emu_jit_stats.compile_attempts, memory_order_relaxed);
   compile_success = atomic_load_explicit(&g_rv32emu_jit_stats.compile_success, memory_order_relaxed);
+  compile_template_hits =
+      atomic_load_explicit(&g_rv32emu_jit_stats.compile_template_hits, memory_order_relaxed);
+  compile_template_stores =
+      atomic_load_explicit(&g_rv32emu_jit_stats.compile_template_stores, memory_order_relaxed);
+  compile_struct_hits =
+      atomic_load_explicit(&g_rv32emu_jit_stats.compile_struct_hits, memory_order_relaxed);
+  compile_struct_stores =
+      atomic_load_explicit(&g_rv32emu_jit_stats.compile_struct_stores, memory_order_relaxed);
   compile_prefix_insns =
       atomic_load_explicit(&g_rv32emu_jit_stats.compile_prefix_insns, memory_order_relaxed);
   compile_prefix_truncated =
@@ -1705,10 +3313,48 @@ void rv32emu_jit_stats_dump(uint64_t executed) {
   helper_cf_calls = atomic_load_explicit(&g_rv32emu_jit_stats.helper_cf_calls, memory_order_relaxed);
   chain_hits = atomic_load_explicit(&g_rv32emu_jit_stats.chain_hits, memory_order_relaxed);
   chain_misses = atomic_load_explicit(&g_rv32emu_jit_stats.chain_misses, memory_order_relaxed);
+  async_jobs_enqueued =
+      atomic_load_explicit(&g_rv32emu_jit_stats.async_jobs_enqueued, memory_order_relaxed);
+  async_jobs_dropped =
+      atomic_load_explicit(&g_rv32emu_jit_stats.async_jobs_dropped, memory_order_relaxed);
+  async_jobs_compiled =
+      atomic_load_explicit(&g_rv32emu_jit_stats.async_jobs_compiled, memory_order_relaxed);
+  async_results_applied =
+      atomic_load_explicit(&g_rv32emu_jit_stats.async_results_applied, memory_order_relaxed);
+  async_results_stale =
+      atomic_load_explicit(&g_rv32emu_jit_stats.async_results_stale, memory_order_relaxed);
+  async_template_applied =
+      atomic_load_explicit(&g_rv32emu_jit_stats.async_template_applied, memory_order_relaxed);
+  async_applied_direct =
+      atomic_load_explicit(&g_rv32emu_jit_stats.async_applied_direct, memory_order_relaxed);
+  async_applied_recycled =
+      atomic_load_explicit(&g_rv32emu_jit_stats.async_applied_recycled, memory_order_relaxed);
+  async_stale_nonportable =
+      atomic_load_explicit(&g_rv32emu_jit_stats.async_stale_nonportable, memory_order_relaxed);
+  async_stale_not_success =
+      atomic_load_explicit(&g_rv32emu_jit_stats.async_stale_not_success, memory_order_relaxed);
+  async_stale_lookup_miss =
+      atomic_load_explicit(&g_rv32emu_jit_stats.async_stale_lookup_miss, memory_order_relaxed);
+  async_stale_state_mismatch =
+      atomic_load_explicit(&g_rv32emu_jit_stats.async_stale_state_mismatch, memory_order_relaxed);
+  async_stale_sig_mismatch =
+      atomic_load_explicit(&g_rv32emu_jit_stats.async_stale_sig_mismatch, memory_order_relaxed);
+  async_evict_queued =
+      atomic_load_explicit(&g_rv32emu_jit_stats.async_evict_queued, memory_order_relaxed);
+  async_sync_fallbacks =
+      atomic_load_explicit(&g_rv32emu_jit_stats.async_sync_fallbacks, memory_order_relaxed);
 
   max_block_insns = rv32emu_tb_max_block_insns_from_env();
   min_prefix_insns = rv32emu_tb_min_prefix_insns_from_env();
   chain_max_insns = rv32emu_tb_chain_max_insns_from_env();
+  async_foreground_sync = rv32emu_tb_jit_async_foreground_sync_from_env() ? 1u : 0u;
+  async_prefetch = rv32emu_tb_jit_async_prefetch_enabled_from_env() ? 1u : 0u;
+  async_recycle = rv32emu_tb_jit_async_recycle_from_env() ? 1u : 0u;
+  template_fast_apply = rv32emu_tb_jit_template_fast_apply_from_env() ? 1u : 0u;
+  async_sync_fallback_spins = rv32emu_tb_jit_async_sync_fallback_spins_from_env();
+  async_busy_pct = rv32emu_tb_jit_async_busy_pct_from_env();
+  async_hot_discount = rv32emu_tb_jit_async_hot_discount_from_env();
+  async_hot_bonus = rv32emu_tb_jit_async_hot_bonus_from_env();
   hot_threshold = rv32emu_tb_hot_threshold_from_env();
   pool_mb = rv32emu_tb_u32_from_env("RV32EMU_EXPERIMENTAL_JIT_POOL_MB",
                                      RV32EMU_JIT_DEFAULT_POOL_MB, 1u, RV32EMU_JIT_MAX_POOL_MB);
@@ -1725,9 +3371,14 @@ void rv32emu_jit_stats_dump(uint64_t executed) {
 
   fprintf(stderr,
           "[jit] cfg hot=%" PRIu32 " block_max=%" PRIu32 " min_prefix=%" PRIu32
-          " chain_max=%" PRIu32 " pool_mb=%" PRIu32
+          " chain_max=%" PRIu32 " async_fg_sync=%" PRIu32 " async_prefetch=%" PRIu32
+          " async_recycle=%" PRIu32 " template_fast_apply=%" PRIu32
+          " async_sync_fallback=%" PRIu32 " async_busy_pct=%" PRIu32
+          " async_hot_discount=%" PRIu32 " async_hot_bonus=%" PRIu32 " pool_mb=%" PRIu32
           " executed=%" PRIu64 "\n",
-          hot_threshold, max_block_insns, min_prefix_insns, chain_max_insns, pool_mb, executed);
+          hot_threshold, max_block_insns, min_prefix_insns, chain_max_insns, async_foreground_sync,
+          async_prefetch, async_recycle, template_fast_apply, async_sync_fallback_spins,
+          async_busy_pct, async_hot_discount, async_hot_bonus, pool_mb, executed);
   fprintf(stderr,
           "[jit] dispatch calls=%" PRIu64 " retired_calls=%" PRIu64 " retired_insns=%" PRIu64
           " retire_rate=%.2f%% avg_retired=%.2f no_ready=%" PRIu64 " handled_no_retire=%" PRIu64
@@ -1737,16 +3388,34 @@ void rv32emu_jit_stats_dump(uint64_t executed) {
           dispatch_budget_clamped);
   fprintf(stderr,
           "[jit] compile attempts=%" PRIu64 " success=%" PRIu64 " hit_rate=%.2f%%"
+          " template_hits=%" PRIu64 " template_stores=%" PRIu64
+          " struct_hits=%" PRIu64 " struct_stores=%" PRIu64
           " prefix_insns=%" PRIu64 " prefix_truncated=%" PRIu64
           " fail_too_short=%" PRIu64 " fail_unsupported_prefix=%" PRIu64
           " fail_alloc=%" PRIu64 " fail_emit=%" PRIu64 "\n",
-          compile_attempts, compile_success, compile_hit_rate, compile_prefix_insns,
-          compile_prefix_truncated, compile_fail_too_short, compile_fail_unsupported_prefix,
-          compile_fail_alloc, compile_fail_emit);
+          compile_attempts, compile_success, compile_hit_rate, compile_template_hits,
+          compile_template_stores, compile_struct_hits, compile_struct_stores, compile_prefix_insns,
+          compile_prefix_truncated,
+          compile_fail_too_short, compile_fail_unsupported_prefix, compile_fail_alloc,
+          compile_fail_emit);
   fprintf(stderr,
           "[jit] helpers mem=%" PRIu64 " cf=%" PRIu64 " chain_hits=%" PRIu64
           " chain_misses=%" PRIu64 "\n",
           helper_mem_calls, helper_cf_calls, chain_hits, chain_misses);
+  fprintf(stderr,
+          "[jit] async enqueued=%" PRIu64 " dropped=%" PRIu64 " compiled=%" PRIu64
+          " applied=%" PRIu64 " stale=%" PRIu64 " template_applied=%" PRIu64
+          " sync_fallbacks=%" PRIu64 "\n",
+          async_jobs_enqueued, async_jobs_dropped, async_jobs_compiled, async_results_applied,
+          async_results_stale, async_template_applied, async_sync_fallbacks);
+  fprintf(stderr,
+          "[jit] async detail applied_direct=%" PRIu64 " applied_recycled=%" PRIu64
+          " stale_nonportable=%" PRIu64 " stale_not_success=%" PRIu64
+          " stale_lookup_miss=%" PRIu64 " stale_state_mismatch=%" PRIu64
+          " stale_sig_mismatch=%" PRIu64 " evict_queued=%" PRIu64 "\n",
+          async_applied_direct, async_applied_recycled, async_stale_nonportable,
+          async_stale_not_success, async_stale_lookup_miss, async_stale_state_mismatch,
+          async_stale_sig_mismatch, async_evict_queued);
 }
 
 rv32emu_tb_block_result_t rv32emu_exec_tb_block(rv32emu_machine_t *m, rv32emu_tb_cache_t *cache,

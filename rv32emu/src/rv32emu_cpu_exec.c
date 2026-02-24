@@ -1047,6 +1047,7 @@ static bool rv32emu_exec_misc_group(rv32emu_machine_t *m, const rv32emu_decoded_
 
 bool rv32emu_exec_decoded(rv32emu_machine_t *m, const rv32emu_decoded_insn_t *decoded) {
   uint32_t next_pc;
+  uint32_t step_len;
   uint32_t rs1v;
   uint32_t rs2v;
 
@@ -1054,7 +1055,8 @@ bool rv32emu_exec_decoded(rv32emu_machine_t *m, const rv32emu_decoded_insn_t *de
     return false;
   }
 
-  next_pc = RV32EMU_CPU(m)->pc + 4u;
+  step_len = (decoded->insn_len == 2u) ? 2u : 4u;
+  next_pc = RV32EMU_CPU(m)->pc + step_len;
   rs1v = RV32EMU_CPU(m)->x[decoded->rs1];
   rs2v = RV32EMU_CPU(m)->x[decoded->rs2];
 

@@ -451,6 +451,7 @@ static int rv32emu_run_threaded(rv32emu_machine_t *m, uint64_t max_instructions,
 
 int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
   const char *threaded_env;
+  int result;
   bool use_tb;
   bool use_jit;
   bool jit_skip_mmode;
@@ -478,17 +479,26 @@ int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
    */
   jit_skip_mmode = rv32emu_env_bool("RV32EMU_EXPERIMENTAL_JIT_SKIP_MMODE", use_jit);
   jit_guard = rv32emu_env_bool("RV32EMU_EXPERIMENTAL_JIT_GUARD", use_jit);
+  if (use_jit) {
+    rv32emu_jit_stats_reset();
+  }
 
   if (m->hart_count == 1u) {
-    return rv32emu_run_single_thread(m, max_instructions, use_tb, use_jit, jit_skip_mmode,
-                                     jit_guard);
+    result = rv32emu_run_single_thread(m, max_instructions, use_tb, use_jit, jit_skip_mmode,
+                                       jit_guard);
+  } else {
+    threaded_env = getenv("RV32EMU_EXPERIMENTAL_HART_THREADS");
+    if (threaded_env == NULL || threaded_env[0] != '1') {
+      result = rv32emu_run_single_thread(m, max_instructions, use_tb, use_jit, jit_skip_mmode,
+                                         jit_guard);
+    } else {
+      result = rv32emu_run_threaded(m, max_instructions, use_tb, use_jit, jit_skip_mmode,
+                                    jit_guard);
+    }
   }
 
-  threaded_env = getenv("RV32EMU_EXPERIMENTAL_HART_THREADS");
-  if (threaded_env == NULL || threaded_env[0] != '1') {
-    return rv32emu_run_single_thread(m, max_instructions, use_tb, use_jit, jit_skip_mmode,
-                                     jit_guard);
+  if (use_jit && result >= 0) {
+    rv32emu_jit_stats_dump((uint64_t)result);
   }
-
-  return rv32emu_run_threaded(m, max_instructions, use_tb, use_jit, jit_skip_mmode, jit_guard);
+  return result;
 }

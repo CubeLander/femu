@@ -56,6 +56,8 @@ typedef struct {
   uint32_t active_start_pc;
   uint8_t active_index;
   uint8_t jit_hot_threshold;
+  uint8_t jit_max_block_insns;
+  uint32_t jit_chain_max_insns;
 } rv32emu_tb_cache_t;
 
 void rv32emu_tb_cache_reset(rv32emu_tb_cache_t *cache);
@@ -64,5 +66,7 @@ rv32emu_tb_block_result_t rv32emu_exec_tb_block(rv32emu_machine_t *m, rv32emu_tb
                                                  uint64_t budget);
 rv32emu_tb_jit_result_t rv32emu_exec_tb_jit(rv32emu_machine_t *m, rv32emu_tb_cache_t *cache,
                                             uint64_t budget);
+void rv32emu_jit_stats_reset(void);
+void rv32emu_jit_stats_dump(uint64_t executed);
 
 #endif

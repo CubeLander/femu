@@ -26,6 +26,8 @@ typedef enum {
 typedef struct {
   /* Original 32-bit instruction word fetched from memory. */
   uint32_t raw;
+  /* Architectural instruction size in bytes (2 for C extension, else 4). */
+  uint8_t insn_len;
   /* Common fixed fields (all extracted by bit slicing). */
   uint32_t opcode;
   uint32_t rd;
@@ -45,5 +47,7 @@ typedef struct {
 
 /* Decode one 32-bit instruction into rv32emu_decoded_insn_t. */
 void rv32emu_decode32(uint32_t insn, rv32emu_decoded_insn_t *decoded);
+/* Expand one 16-bit compressed instruction into canonical decoded form. */
+bool rv32emu_decode16(uint16_t insn, rv32emu_decoded_insn_t *decoded);
 
 #endif

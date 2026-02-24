@@ -861,6 +861,9 @@ static void test_jit_jal_jalr_helper_paths(void) {
 }
 
 int main(void) {
+  setenv("RV32EMU_EXPERIMENTAL_JIT_GUARD", "0", 1);
+  setenv("RV32EMU_EXPERIMENTAL_JIT_SKIP_MMODE", "0", 1);
+
   test_base32();
   test_rvc_basic();
   test_multihart_round_robin();
@@ -877,6 +880,9 @@ int main(void) {
   test_jit_chain_branch_side_exit_recovery();
   test_jit_multi_trap_resume_consistency();
   test_jit_jal_jalr_helper_paths();
+
+  unsetenv("RV32EMU_EXPERIMENTAL_JIT_SKIP_MMODE");
+  unsetenv("RV32EMU_EXPERIMENTAL_JIT_GUARD");
   puts("[OK] rv32emu run test passed");
   return 0;
 }

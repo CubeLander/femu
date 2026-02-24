@@ -20,7 +20,9 @@ Quick checks:
 - `make rv32emu-bin`
 - `make rv32emu-bin-perf`
 - `make smoke-emulator`
+- `make smoke-emulator-jit`
 - `make smoke-emulator-perf`
+- `make smoke-emulator-jit-perf`
 - `make smoke-emulator-tb-perf`
 - `make smoke-emulator-strict`
 - `make build-linux-smp`

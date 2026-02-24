@@ -73,6 +73,13 @@ Execution fast-path controls:
 5. `RV32EMU_EXPERIMENTAL_JIT_GUARD=1`: enable conservative no-progress cooldown/fallback guard in run loop.
 6. `RV32EMU_EXPERIMENTAL_JIT_DISABLE_ALU=1|..._MEM=1|..._CF=1`: selectively disable JIT opcode classes for triage.
 
+When `RV32EMU_EXPERIMENTAL_JIT=1` is enabled, runner defaults are safety-first:
+
+1. `RV32EMU_EXPERIMENTAL_JIT_SKIP_MMODE` defaults to enabled.
+2. `RV32EMU_EXPERIMENTAL_JIT_GUARD` defaults to enabled.
+
+Use explicit `...=0` to override either behavior.
+
 JIT is currently a prefix JIT:
 
 1. Build a decoded TB line.

@@ -13,6 +13,35 @@
 
 bool rv32emu_exec_one(rv32emu_machine_t *m);
 
+static bool rv32emu_env_bool(const char *name, bool default_value) {
+  const char *value;
+
+  if (name == NULL) {
+    return default_value;
+  }
+  value = getenv(name);
+  if (value == NULL || value[0] == '\0') {
+    return default_value;
+  }
+
+  switch (value[0]) {
+  case '1':
+  case 'y':
+  case 'Y':
+  case 't':
+  case 'T':
+    return true;
+  case '0':
+  case 'n':
+  case 'N':
+  case 'f':
+  case 'F':
+    return false;
+  default:
+    return default_value;
+  }
+}
+
 static uint32_t rv32emu_exec_interp_burst(rv32emu_machine_t *m, uint64_t budget) {
   uint32_t retired = 0u;
   uint32_t idle_spins = 0u;
@@ -422,10 +451,6 @@ static int rv32emu_run_threaded(rv32emu_machine_t *m, uint64_t max_instructions,
 
 int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
   const char *threaded_env;
-  const char *tb_env;
-  const char *jit_env;
-  const char *jit_skip_mmode_env;
-  const char *jit_guard_env;
   bool use_tb;
   bool use_jit;
   bool jit_skip_mmode;
@@ -442,14 +467,17 @@ int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions) {
   if (max_instructions == 0) {
     max_instructions = RV32EMU_DEFAULT_MAX_INSTR;
   }
-  tb_env = getenv("RV32EMU_EXPERIMENTAL_TB");
-  use_tb = (tb_env != NULL && tb_env[0] == '1');
-  jit_env = getenv("RV32EMU_EXPERIMENTAL_JIT");
-  use_jit = (jit_env != NULL && jit_env[0] == '1');
-  jit_skip_mmode_env = getenv("RV32EMU_EXPERIMENTAL_JIT_SKIP_MMODE");
-  jit_skip_mmode = (jit_skip_mmode_env != NULL && jit_skip_mmode_env[0] == '1');
-  jit_guard_env = getenv("RV32EMU_EXPERIMENTAL_JIT_GUARD");
-  jit_guard = (jit_guard_env != NULL && jit_guard_env[0] == '1');
+  use_tb = rv32emu_env_bool("RV32EMU_EXPERIMENTAL_TB", false);
+  use_jit = rv32emu_env_bool("RV32EMU_EXPERIMENTAL_JIT", false);
+  /*
+   * JIT defaults are safety-first for Linux boot:
+   * - skip M-mode by default (OpenSBI path stays interpreter/TB)
+   * - enable no-progress guard by default
+   *
+   * Both can be overridden explicitly via env=0/1.
+   */
+  jit_skip_mmode = rv32emu_env_bool("RV32EMU_EXPERIMENTAL_JIT_SKIP_MMODE", use_jit);
+  jit_guard = rv32emu_env_bool("RV32EMU_EXPERIMENTAL_JIT_GUARD", use_jit);
 
   if (m->hart_count == 1u) {
     return rv32emu_run_single_thread(m, max_instructions, use_tb, use_jit, jit_skip_mmode,

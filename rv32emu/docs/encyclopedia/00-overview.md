@@ -20,25 +20,25 @@ Core headers:
 
 Execution and CPU:
 
-1. `src/rv32emu_cpu_exec.c`: instruction semantics and grouped execute paths.
-2. `src/rv32emu_cpu_exec_system.c`: CSR/system-return behavior (`mret`/`sret`).
-3. `src/rv32emu_cpu_run.c`: single-thread and threaded run loops.
-4. `src/rv32emu_decode.c`: decode stage (`rv32emu_decode32`).
-5. `src/rv32emu_tb.c`: TB build/lookup and decoded-block step execution.
+1. `src/cpu/rv32emu_cpu_exec.c`: instruction semantics and grouped execute paths.
+2. `src/cpu/rv32emu_cpu_exec_system.c`: CSR/system-return behavior (`mret`/`sret`).
+3. `src/cpu/rv32emu_cpu_run.c`: single-thread and threaded run loops.
+4. `src/cpu/rv32emu_decode.c`: decode stage (`rv32emu_decode32`).
+5. `src/tb/rv32emu_tb.c`: TB build/lookup and decoded-block step execution.
 
 Memory and platform:
 
-1. `src/rv32emu_memory_mmio.c`: DRAM fast/atomic paths + MMIO dispatch entry.
-2. `src/rv32emu_mmio_devices.c`: top MMIO dispatcher + virtio placeholders.
-3. `src/rv32emu_mmio_uart_plic.c`: UART/PLIC behavior.
-4. `src/rv32emu_mmio_clint_timer.c`: CLINT/timer behavior.
-5. `src/rv32emu_platform.c`: machine init/destroy and defaults.
+1. `src/memory/rv32emu_memory_mmio.c`: DRAM fast/atomic paths + MMIO dispatch entry.
+2. `src/memory/rv32emu_mmio_devices.c`: top MMIO dispatcher + virtio placeholders.
+3. `src/memory/rv32emu_mmio_uart_plic.c`: UART/PLIC behavior.
+4. `src/memory/rv32emu_mmio_clint_timer.c`: CLINT/timer behavior.
+5. `src/platform/rv32emu_platform.c`: machine init/destroy and defaults.
 
 Trap/MMU/SBI/Loader:
 
-1. `src/rv32emu_virt_trap.c`: address translation, trap routing, interrupt handling.
-2. `src/rv32emu_csr.c`: CSR read/write semantics.
-3. `src/rv32emu_stubs.c`: SBI handlers + image loading (`raw`, `ELF32`, `auto`).
+1. `src/cpu/rv32emu_virt_trap.c`: address translation, trap routing, interrupt handling.
+2. `src/cpu/rv32emu_csr.c`: CSR read/write semantics.
+3. `src/platform/rv32emu_stubs.c`: SBI handlers + image loading (`raw`, `ELF32`, `auto`).
 
 Tests:
 

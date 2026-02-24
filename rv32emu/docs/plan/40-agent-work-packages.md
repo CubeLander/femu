@@ -11,9 +11,9 @@ Scope:
 
 Primary source files:
 
-1. `src/rv32emu_cpu_exec.c`
-2. `src/rv32emu_cpu_exec_system.c`
-3. `src/rv32emu_decode.c`
+1. `src/cpu/rv32emu_cpu_exec.c`
+2. `src/cpu/rv32emu_cpu_exec_system.c`
+3. `src/cpu/rv32emu_decode.c`
 
 Deliverables:
 
@@ -35,8 +35,8 @@ Scope:
 
 Primary source files:
 
-1. `src/rv32emu_virt_trap.c`
-2. `src/rv32emu_csr.c`
+1. `src/cpu/rv32emu_virt_trap.c`
+2. `src/cpu/rv32emu_csr.c`
 3. `include/rv32emu.h`
 
 Deliverables:
@@ -58,10 +58,10 @@ Scope:
 
 Primary source files:
 
-1. `src/rv32emu_memory_mmio.c`
-2. `src/rv32emu_mmio_devices.c`
-3. `src/rv32emu_mmio_uart_plic.c`
-4. `src/rv32emu_mmio_clint_timer.c`
+1. `src/memory/rv32emu_memory_mmio.c`
+2. `src/memory/rv32emu_mmio_devices.c`
+3. `src/memory/rv32emu_mmio_uart_plic.c`
+4. `src/memory/rv32emu_mmio_clint_timer.c`
 
 Deliverables:
 
@@ -107,9 +107,9 @@ Scope:
 
 Primary source files:
 
-1. `src/rv32emu_tb.c`
+1. `src/tb/rv32emu_tb.c`
 2. `include/rv32emu_tb.h`
-3. `src/rv32emu_cpu_run.c`
+3. `src/cpu/rv32emu_cpu_run.c`
 
 Deliverables:
 

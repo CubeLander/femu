@@ -9,6 +9,7 @@ This `docs/` tree is the living architecture encyclopedia for the RV32 emulator 
 3. `docs/encyclopedia/20-memory-mmu-mmio.md`: memory, MMU, traps, and MMIO map.
 4. `docs/testing/30-test-strategy.md`: current test strategy and gap list.
 5. `docs/plan/40-agent-work-packages.md`: parallel task split for documentation agents.
+6. `docs/plan/42-source-layout-refactor-plan.md`: source tree cleanup and `.inc` removal plan.
 
 ## Recommended Reading Order
 

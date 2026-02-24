@@ -13,13 +13,13 @@ Base map (`include/rv32emu.h`):
 
 Dispatch flow:
 
-1. `rv32emu_phys_read` / `rv32emu_phys_write` first tries DRAM range, then falls back to MMIO (`src/rv32emu_memory_mmio.c`).
-2. MMIO dispatch is centralized in `rv32emu_mmio_read_locked` / `rv32emu_mmio_write_locked` (`src/rv32emu_mmio_devices.c`).
-3. All MMIO handlers run under `m->plat.mmio_lock` from the physical access layer (`src/rv32emu_memory_mmio.c`).
+1. `rv32emu_phys_read` / `rv32emu_phys_write` first tries DRAM range, then falls back to MMIO (`src/memory/rv32emu_memory_mmio.c`).
+2. MMIO dispatch is centralized in `rv32emu_mmio_read_locked` / `rv32emu_mmio_write_locked` (`src/memory/rv32emu_mmio_devices.c`).
+3. All MMIO handlers run under `m->plat.mmio_lock` from the physical access layer (`src/memory/rv32emu_memory_mmio.c`).
 
 ## 2. UART Register Behavior (NS16550-like subset)
 
-Implementation: `src/rv32emu_mmio_uart_plic.c`.
+Implementation: `src/memory/rv32emu_mmio_uart_plic.c`.
 
 Access width:
 
@@ -49,11 +49,11 @@ Important bit definitions used by the model:
 FIFO and state:
 
 1. RX FIFO is a software ring buffer, size `RV32EMU_UART_RX_FIFO_SIZE = 256` (`include/rv32emu.h`).
-2. External input uses `rv32emu_uart_push_rx`, which enqueues a byte and re-evaluates IRQ state (`src/rv32emu_mmio_uart_plic.c`).
+2. External input uses `rv32emu_uart_push_rx`, which enqueues a byte and re-evaluates IRQ state (`src/memory/rv32emu_mmio_uart_plic.c`).
 
 ## 3. CLINT Register Behavior
 
-Implementation: `src/rv32emu_mmio_clint_timer.c`.
+Implementation: `src/memory/rv32emu_mmio_clint_timer.c`.
 
 Access width/alignment:
 
@@ -78,12 +78,12 @@ IRQ effects:
 
 Timer stepping model:
 
-1. `rv32emu_step_timer` calls `rv32emu_mmio_step_timer` (`src/rv32emu_memory_mmio.c`).
-2. `rv32emu_mmio_step_timer` increments `mtime` by 1 each call and refreshes IRQs only when `mtime` reaches cached `next_timer_deadline` (`src/rv32emu_mmio_clint_timer.c`, `include/rv32emu.h`).
+1. `rv32emu_step_timer` calls `rv32emu_mmio_step_timer` (`src/memory/rv32emu_memory_mmio.c`).
+2. `rv32emu_mmio_step_timer` increments `mtime` by 1 each call and refreshes IRQs only when `mtime` reaches cached `next_timer_deadline` (`src/memory/rv32emu_mmio_clint_timer.c`, `include/rv32emu.h`).
 
 ## 4. PLIC Register Behavior
 
-Implementation: `src/rv32emu_mmio_uart_plic.c`.
+Implementation: `src/memory/rv32emu_mmio_uart_plic.c`.
 
 Context model:
 
@@ -114,7 +114,7 @@ Claim policy:
 
 UART to CPU external interrupt path:
 
-1. RX path: `rv32emu_uart_push_rx` or `RBR`/`IER`/`FCR` write updates UART state (`src/rv32emu_mmio_uart_plic.c`).
+1. RX path: `rv32emu_uart_push_rx` or `RBR`/`IER`/`FCR` write updates UART state (`src/memory/rv32emu_mmio_uart_plic.c`).
 2. `rv32emu_uart_sync_irq` sets/clears `plic_pending` bit 10 (`UART_PLIC_IRQ = 10`).
 3. `rv32emu_update_plic_irq_lines` computes `pending & enable` for each hart M-context/S-context.
 4. CPU `mip` is updated: `MIP_MEIP` for M-context, `MIP_SEIP` for S-context.
@@ -128,7 +128,7 @@ CLINT software/timer interrupt path:
 
 ## 6. VirtIO MMIO Placeholder and Other Gaps
 
-Implementation: `src/rv32emu_mmio_devices.c`.
+Implementation: `src/memory/rv32emu_mmio_devices.c`.
 
 Current behavior in `0x10001000..0x10008fff`:
 

@@ -4,10 +4,10 @@
 
 Primary code paths:
 
-1. `src/rv32emu_tb.c`
+1. `src/tb/rv32emu_tb.c`
 2. `include/rv32emu_tb.h`
-3. `src/rv32emu_cpu_run.c`
-4. `src/rv32emu_cpu_exec.c`
+3. `src/cpu/rv32emu_cpu_run.c`
+4. `src/cpu/rv32emu_cpu_exec.c`
 
 Current implementation has both:
 
@@ -24,7 +24,7 @@ Current implementation has both:
    - `start_pc`
    - `pcs[]` (per instruction PC)
    - `decoded[]` (`rv32emu_decoded_insn_t` array)
-3. Cache line index is `(pc >> 2) & (RV32EMU_TB_LINES - 1)` (`rv32emu_tb_index` in `src/rv32emu_tb.c`).
+3. Cache line index is `(pc >> 2) & (RV32EMU_TB_LINES - 1)` (`rv32emu_tb_index` in `src/tb/rv32emu_tb.c`).
 
 ### 1.2 Block Build Policy
 
@@ -59,13 +59,13 @@ If zero instructions were appended, build fails (`false`).
 
 ### 2.1 Correctness Invariants
 
-1. Semantic source of truth is single path `rv32emu_exec_decoded` (`src/rv32emu_cpu_exec.c`), used by both TB and non-TB paths.
+1. Semantic source of truth is single path `rv32emu_exec_decoded` (`src/cpu/rv32emu_cpu_exec.c`), used by both TB and non-TB paths.
 2. Architectural state update remains centralized in `rv32emu_exec_decoded`:
    - PC commit
    - `x0` hardwire reset
    - `cycle`/`instret` increment
    - timer step
-3. TB mode never bypasses interrupt polling: run loops call `rv32emu_check_pending_interrupt` before TB dispatch (`src/rv32emu_cpu_run.c`).
+3. TB mode never bypasses interrupt polling: run loops call `rv32emu_check_pending_interrupt` before TB dispatch (`src/cpu/rv32emu_cpu_run.c`).
 4. TB execution granularity is one instruction per outer loop iteration; no multi-instruction atomic commit.
 
 ### 2.2 Side-Exit Rules (Current)
@@ -94,7 +94,7 @@ Result policy:
 
 ### 3.2 Runner Fallback Policy
 
-In both single-thread and threaded loops (`src/rv32emu_cpu_run.c`):
+In both single-thread and threaded loops (`src/cpu/rv32emu_cpu_run.c`):
 
 1. TB mode is opt-in via `RV32EMU_EXPERIMENTAL_TB=1`.
 2. When TB dispatch returns `false` and hart is still running, runner retries same step via `rv32emu_exec_one`.

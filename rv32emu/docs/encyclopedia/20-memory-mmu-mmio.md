@@ -17,11 +17,11 @@ Main access APIs:
 
 ## 2. DRAM Path
 
-`src/rv32emu_memory_mmio.c` provides DRAM fast path and helper conversion routines:
+`src/memory/rv32emu_memory_mmio.c` provides DRAM fast path and helper conversion routines:
 
 1. Native little-endian load/store helpers for 1/2/4-byte accesses.
 2. Atomic byte/halfword/word path for threaded execution mode.
-3. LR/SC invalidation is coordinated in virtual write flow (`src/rv32emu_virt_trap.c`).
+3. LR/SC invalidation is coordinated in virtual write flow (`src/cpu/rv32emu_virt_trap.c`).
 
 ## 3. MMIO Split
 
@@ -41,7 +41,7 @@ Timer behavior:
 
 ## 5. MMU and Trap Flow
 
-`src/rv32emu_virt_trap.c` handles:
+`src/cpu/rv32emu_virt_trap.c` handles:
 
 1. Sv32 translation (`satp` mode checks and page-table walk).
 2. Access rights and fault classification.
@@ -50,7 +50,7 @@ Timer behavior:
 
 ## 6. CSR Interaction
 
-CSR behavior lives in `src/rv32emu_csr.c` and is consumed across execute/trap paths.
+CSR behavior lives in `src/cpu/rv32emu_csr.c` and is consumed across execute/trap paths.
 
 Important interactions:
 

@@ -36,8 +36,8 @@ make smoke-emulator-smp-linux
 代码侧对应落点：
 
 1. OpenSBI 多核启动模型修正：`rv32emu/tools/rv32emu_main.c`
-2. LR/SC 多核语义修正：`rv32emu/src/rv32emu_virt_trap.c`
-3. 多核调度切片优化：`rv32emu/src/rv32emu_cpu_exec.c`
+2. LR/SC 多核语义修正：`rv32emu/src/cpu/rv32emu_virt_trap.c`
+3. 多核调度切片优化：`rv32emu/src/cpu/rv32emu_cpu_exec.c`
 4. 双核 LR/SC 回归测试：`rv32emu/tests/test_run.c`
 
 ---
@@ -62,12 +62,12 @@ make smoke-emulator-smp-linux
 ### 3.2 次核唤醒（CLINT MSIP）
 
 CLINT `MSIP` 写路径中，如果目标 hart 尚未运行，会把它置为 `running=true`，并设置对应 `MIP.MSIP`。  
-实现位置：`rv32emu/src/rv32emu_memory_mmio.c`。
+实现位置：`rv32emu/src/memory/rv32emu_memory_mmio.c`。
 
 ### 3.3 多核执行调度
 
 `rv32emu_run()` 使用单线程轮转调度；每个 hart 连续执行一个指令切片（当前 `64` 条），再切换到下一 hart。  
-实现位置：`rv32emu/src/rv32emu_cpu_exec.c`。
+实现位置：`rv32emu/src/cpu/rv32emu_cpu_exec.c`。
 
 ---
 
@@ -144,8 +144,8 @@ CLINT `MSIP` 写路径中，如果目标 hart 尚未运行，会把它置为 `ru
 
 实现与注释位置：
 
-1. `rv32emu/src/rv32emu_virt_trap.c`
-2. `rv32emu/src/rv32emu_cpu_exec.c`（`lr.w/sc.w/amo` 语义注释）
+1. `rv32emu/src/cpu/rv32emu_virt_trap.c`
+2. `rv32emu/src/cpu/rv32emu_cpu_exec.c`（`lr.w/sc.w/amo` 语义注释）
 
 回归测试：
 
@@ -166,7 +166,7 @@ CLINT `MSIP` 写路径中，如果目标 hart 尚未运行，会把它置为 `ru
 
 位置：
 
-1. `rv32emu/src/rv32emu_cpu_exec.c`
+1. `rv32emu/src/cpu/rv32emu_cpu_exec.c`
 
 ---
 

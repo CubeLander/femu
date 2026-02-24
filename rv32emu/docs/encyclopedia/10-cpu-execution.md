@@ -12,9 +12,9 @@ Current instruction path can be understood as:
 
 Primary entry points:
 
-1. `rv32emu_exec_one` in `src/rv32emu_cpu_exec.c`.
-2. `rv32emu_exec_decoded` in `src/rv32emu_cpu_exec.c`.
-3. Run loop in `src/rv32emu_cpu_run.c`.
+1. `rv32emu_exec_one` in `src/cpu/rv32emu_cpu_exec.c`.
+2. `rv32emu_exec_decoded` in `src/cpu/rv32emu_cpu_exec.c`.
+3. Run loop in `src/cpu/rv32emu_cpu_run.c`.
 
 ## 2. Decode Stage
 
@@ -27,7 +27,7 @@ For 32-bit instructions, decode output (`rv32emu_decoded_insn_t`) includes:
 
 Current decoder location:
 
-1. `src/rv32emu_decode.c`
+1. `src/cpu/rv32emu_decode.c`
 2. `include/rv32emu_decode.h`
 
 ## 3. Execute Grouping (Pedagogical Layout)
@@ -45,7 +45,7 @@ Compressed instructions are handled separately by `rv32emu_exec_compressed`.
 
 System details are split into dedicated file:
 
-1. `src/rv32emu_cpu_exec_system.c`:
+1. `src/cpu/rv32emu_cpu_exec_system.c`:
    - `rv32emu_exec_csr_op`
    - `rv32emu_exec_mret`
    - `rv32emu_exec_sret`
@@ -54,7 +54,7 @@ This separation makes it easier to reason about privilege transitions and CSR si
 
 ## 5. Run Loop and Multi-Hart Scheduling
 
-Run loop policies (`src/rv32emu_cpu_run.c`):
+Run loop policies (`src/cpu/rv32emu_cpu_run.c`):
 
 1. Single-thread round-robin across harts.
 2. Optional threaded mode via `RV32EMU_EXPERIMENTAL_HART_THREADS=1`.

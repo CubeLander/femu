@@ -6,7 +6,7 @@ CPPFLAGS ?= -Iinclude -D_POSIX_C_SOURCE=200809L
 THREAD_FLAGS ?= -pthread
 
 BUILD_DIR := build
-SRCS := $(wildcard src/*.c)
+SRCS := $(shell find src -type f -name '*.c' | sort)
 OBJS := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 DEPS := $(OBJS:.o=.d)
 LIB := $(BUILD_DIR)/librv32emu.a
@@ -19,6 +19,7 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 $(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
+	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(THREAD_FLAGS) -MMD -MP -c $< -o $@
 
 $(LIB): $(OBJS)

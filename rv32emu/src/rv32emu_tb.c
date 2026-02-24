@@ -14,6 +14,7 @@ bool rv32emu_exec_decoded(rv32emu_machine_t *m, const rv32emu_decoded_insn_t *de
 
 #define RV32EMU_JIT_DEFAULT_HOT_THRESHOLD 3u
 #define RV32EMU_JIT_DEFAULT_MAX_INSNS_PER_BLOCK 8u
+#define RV32EMU_JIT_DEFAULT_MIN_PREFIX_INSNS 4u
 #define RV32EMU_JIT_DEFAULT_CHAIN_MAX_INSNS 64u
 #define RV32EMU_JIT_MAX_CHAIN_LIMIT 4096u
 #define RV32EMU_JIT_DEFAULT_POOL_MB 4u
@@ -109,6 +110,12 @@ static uint8_t rv32emu_tb_max_block_insns_from_env(void) {
                                           RV32EMU_TB_MAX_INSNS);
 }
 
+static uint8_t rv32emu_tb_min_prefix_insns_from_env(void) {
+  return (uint8_t)rv32emu_tb_u32_from_env("RV32EMU_EXPERIMENTAL_JIT_MIN_PREFIX_INSNS",
+                                          RV32EMU_JIT_DEFAULT_MIN_PREFIX_INSNS, 1u,
+                                          RV32EMU_TB_MAX_INSNS);
+}
+
 static uint32_t rv32emu_tb_chain_max_insns_from_env(void) {
   return rv32emu_tb_u32_from_env("RV32EMU_EXPERIMENTAL_JIT_CHAIN_MAX_INSNS",
                                  RV32EMU_JIT_DEFAULT_CHAIN_MAX_INSNS, 1u,
@@ -134,6 +141,7 @@ typedef struct {
   atomic_uint_fast64_t compile_success;
   atomic_uint_fast64_t compile_prefix_insns;
   atomic_uint_fast64_t compile_prefix_truncated;
+  atomic_uint_fast64_t compile_fail_too_short;
   atomic_uint_fast64_t compile_fail_unsupported_prefix;
   atomic_uint_fast64_t compile_fail_alloc;
   atomic_uint_fast64_t compile_fail_emit;
@@ -155,6 +163,7 @@ static rv32emu_jit_stats_t g_rv32emu_jit_stats = {
     .compile_success = ATOMIC_VAR_INIT(0u),
     .compile_prefix_insns = ATOMIC_VAR_INIT(0u),
     .compile_prefix_truncated = ATOMIC_VAR_INIT(0u),
+    .compile_fail_too_short = ATOMIC_VAR_INIT(0u),
     .compile_fail_unsupported_prefix = ATOMIC_VAR_INIT(0u),
     .compile_fail_alloc = ATOMIC_VAR_INIT(0u),
     .compile_fail_emit = ATOMIC_VAR_INIT(0u),
@@ -1159,6 +1168,7 @@ static uint32_t rv32emu_tb_line_next_pc_for_count(const rv32emu_tb_line_t *line,
 static bool rv32emu_tb_try_compile_jit(rv32emu_tb_cache_t *cache, rv32emu_tb_line_t *line) {
   uint32_t jit_count = 0u;
   uint32_t max_jit_insns = RV32EMU_JIT_DEFAULT_MAX_INSNS_PER_BLOCK;
+  uint32_t min_prefix_insns = RV32EMU_JIT_DEFAULT_MIN_PREFIX_INSNS;
   uint32_t epilogue_next_pc;
   size_t code_bytes;
   uint8_t *code_ptr;
@@ -1169,6 +1179,12 @@ static bool rv32emu_tb_try_compile_jit(rv32emu_tb_cache_t *cache, rv32emu_tb_lin
   }
   if (cache != NULL && cache->jit_max_block_insns != 0u) {
     max_jit_insns = cache->jit_max_block_insns;
+  }
+  if (cache != NULL && cache->jit_min_prefix_insns != 0u) {
+    min_prefix_insns = cache->jit_min_prefix_insns;
+  }
+  if (min_prefix_insns > max_jit_insns) {
+    min_prefix_insns = max_jit_insns;
   }
 
   RV32EMU_JIT_STATS_INC(compile_attempts);
@@ -1192,6 +1208,10 @@ static bool rv32emu_tb_try_compile_jit(rv32emu_tb_cache_t *cache, rv32emu_tb_lin
 
   if (jit_count == 0u) {
     RV32EMU_JIT_STATS_INC(compile_fail_unsupported_prefix);
+    return false;
+  }
+  if (jit_count < min_prefix_insns) {
+    RV32EMU_JIT_STATS_INC(compile_fail_too_short);
     return false;
   }
 
@@ -1288,6 +1308,7 @@ void rv32emu_tb_cache_reset(rv32emu_tb_cache_t *cache) {
   cache->active = false;
   cache->jit_hot_threshold = rv32emu_tb_hot_threshold_from_env();
   cache->jit_max_block_insns = rv32emu_tb_max_block_insns_from_env();
+  cache->jit_min_prefix_insns = rv32emu_tb_min_prefix_insns_from_env();
   cache->jit_chain_max_insns = rv32emu_tb_chain_max_insns_from_env();
   for (uint32_t i = 0u; i < RV32EMU_TB_LINES; i++) {
     cache->lines[i].valid = false;
@@ -1607,6 +1628,7 @@ void rv32emu_jit_stats_reset(void) {
   atomic_store_explicit(&g_rv32emu_jit_stats.compile_success, 0u, memory_order_relaxed);
   atomic_store_explicit(&g_rv32emu_jit_stats.compile_prefix_insns, 0u, memory_order_relaxed);
   atomic_store_explicit(&g_rv32emu_jit_stats.compile_prefix_truncated, 0u, memory_order_relaxed);
+  atomic_store_explicit(&g_rv32emu_jit_stats.compile_fail_too_short, 0u, memory_order_relaxed);
   atomic_store_explicit(&g_rv32emu_jit_stats.compile_fail_unsupported_prefix, 0u,
                         memory_order_relaxed);
   atomic_store_explicit(&g_rv32emu_jit_stats.compile_fail_alloc, 0u, memory_order_relaxed);
@@ -1629,6 +1651,7 @@ void rv32emu_jit_stats_dump(uint64_t executed) {
   uint64_t compile_success;
   uint64_t compile_prefix_insns;
   uint64_t compile_prefix_truncated;
+  uint64_t compile_fail_too_short;
   uint64_t compile_fail_unsupported_prefix;
   uint64_t compile_fail_alloc;
   uint64_t compile_fail_emit;
@@ -1637,6 +1660,7 @@ void rv32emu_jit_stats_dump(uint64_t executed) {
   uint64_t chain_hits;
   uint64_t chain_misses;
   uint32_t max_block_insns;
+  uint32_t min_prefix_insns;
   uint32_t chain_max_insns;
   uint32_t hot_threshold;
   uint32_t pool_mb;
@@ -1668,6 +1692,8 @@ void rv32emu_jit_stats_dump(uint64_t executed) {
       atomic_load_explicit(&g_rv32emu_jit_stats.compile_prefix_insns, memory_order_relaxed);
   compile_prefix_truncated =
       atomic_load_explicit(&g_rv32emu_jit_stats.compile_prefix_truncated, memory_order_relaxed);
+  compile_fail_too_short =
+      atomic_load_explicit(&g_rv32emu_jit_stats.compile_fail_too_short, memory_order_relaxed);
   compile_fail_unsupported_prefix =
       atomic_load_explicit(&g_rv32emu_jit_stats.compile_fail_unsupported_prefix,
                            memory_order_relaxed);
@@ -1681,6 +1707,7 @@ void rv32emu_jit_stats_dump(uint64_t executed) {
   chain_misses = atomic_load_explicit(&g_rv32emu_jit_stats.chain_misses, memory_order_relaxed);
 
   max_block_insns = rv32emu_tb_max_block_insns_from_env();
+  min_prefix_insns = rv32emu_tb_min_prefix_insns_from_env();
   chain_max_insns = rv32emu_tb_chain_max_insns_from_env();
   hot_threshold = rv32emu_tb_hot_threshold_from_env();
   pool_mb = rv32emu_tb_u32_from_env("RV32EMU_EXPERIMENTAL_JIT_POOL_MB",
@@ -1697,9 +1724,10 @@ void rv32emu_jit_stats_dump(uint64_t executed) {
   }
 
   fprintf(stderr,
-          "[jit] cfg hot=%" PRIu32 " block_max=%" PRIu32 " chain_max=%" PRIu32 " pool_mb=%" PRIu32
+          "[jit] cfg hot=%" PRIu32 " block_max=%" PRIu32 " min_prefix=%" PRIu32
+          " chain_max=%" PRIu32 " pool_mb=%" PRIu32
           " executed=%" PRIu64 "\n",
-          hot_threshold, max_block_insns, chain_max_insns, pool_mb, executed);
+          hot_threshold, max_block_insns, min_prefix_insns, chain_max_insns, pool_mb, executed);
   fprintf(stderr,
           "[jit] dispatch calls=%" PRIu64 " retired_calls=%" PRIu64 " retired_insns=%" PRIu64
           " retire_rate=%.2f%% avg_retired=%.2f no_ready=%" PRIu64 " handled_no_retire=%" PRIu64
@@ -1710,10 +1738,11 @@ void rv32emu_jit_stats_dump(uint64_t executed) {
   fprintf(stderr,
           "[jit] compile attempts=%" PRIu64 " success=%" PRIu64 " hit_rate=%.2f%%"
           " prefix_insns=%" PRIu64 " prefix_truncated=%" PRIu64
-          " fail_unsupported_prefix=%" PRIu64 " fail_alloc=%" PRIu64 " fail_emit=%" PRIu64 "\n",
+          " fail_too_short=%" PRIu64 " fail_unsupported_prefix=%" PRIu64
+          " fail_alloc=%" PRIu64 " fail_emit=%" PRIu64 "\n",
           compile_attempts, compile_success, compile_hit_rate, compile_prefix_insns,
-          compile_prefix_truncated, compile_fail_unsupported_prefix, compile_fail_alloc,
-          compile_fail_emit);
+          compile_prefix_truncated, compile_fail_too_short, compile_fail_unsupported_prefix,
+          compile_fail_alloc, compile_fail_emit);
   fprintf(stderr,
           "[jit] helpers mem=%" PRIu64 " cf=%" PRIu64 " chain_hits=%" PRIu64
           " chain_misses=%" PRIu64 "\n",

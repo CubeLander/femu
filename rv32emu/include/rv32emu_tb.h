@@ -57,6 +57,7 @@ typedef struct {
   uint8_t active_index;
   uint8_t jit_hot_threshold;
   uint8_t jit_max_block_insns;
+  uint8_t jit_min_prefix_insns;
   uint32_t jit_chain_max_insns;
 } rv32emu_tb_cache_t;
 

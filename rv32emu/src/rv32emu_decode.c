@@ -168,6 +168,14 @@ bool rv32emu_decode16(uint16_t insn, rv32emu_decoded_insn_t *decoded) {
       decoded->rs1 = 2u;
       decoded->imm_i = (int32_t)imm;
       break;
+    case 0x1: /* c.fld -> fld rd', uimm(rs1') */
+      decoded->opcode = 0x07u;
+      decoded->rd = 8u + rv32emu_bits16(insn, 4, 2);
+      decoded->funct3 = 0x3u;
+      decoded->rs1 = 8u + rv32emu_bits16(insn, 9, 7);
+      imm = (rv32emu_bits16(insn, 12, 10) << 3) | (rv32emu_bits16(insn, 6, 5) << 6);
+      decoded->imm_i = (int32_t)imm;
+      break;
     case 0x2: /* c.lw -> lw rd', uimm(rs1') */
       decoded->opcode = 0x03u;
       decoded->rd = 8u + rv32emu_bits16(insn, 4, 2);
@@ -177,8 +185,34 @@ bool rv32emu_decode16(uint16_t insn, rv32emu_decoded_insn_t *decoded) {
             (rv32emu_bits16(insn, 5, 5) << 6);
       decoded->imm_i = (int32_t)imm;
       break;
+    case 0x3: /* c.flw -> flw rd', uimm(rs1') */
+      decoded->opcode = 0x07u;
+      decoded->rd = 8u + rv32emu_bits16(insn, 4, 2);
+      decoded->funct3 = 0x2u;
+      decoded->rs1 = 8u + rv32emu_bits16(insn, 9, 7);
+      imm = (rv32emu_bits16(insn, 6, 6) << 2) | (rv32emu_bits16(insn, 12, 10) << 3) |
+            (rv32emu_bits16(insn, 5, 5) << 6);
+      decoded->imm_i = (int32_t)imm;
+      break;
+    case 0x5: /* c.fsd -> fsd rs2', uimm(rs1') */
+      decoded->opcode = 0x27u;
+      decoded->funct3 = 0x3u;
+      decoded->rs1 = 8u + rv32emu_bits16(insn, 9, 7);
+      decoded->rs2 = 8u + rv32emu_bits16(insn, 4, 2);
+      imm = (rv32emu_bits16(insn, 12, 10) << 3) | (rv32emu_bits16(insn, 6, 5) << 6);
+      decoded->imm_s = (int32_t)imm;
+      break;
     case 0x6: /* c.sw -> sw rs2', uimm(rs1') */
       decoded->opcode = 0x23u;
+      decoded->funct3 = 0x2u;
+      decoded->rs1 = 8u + rv32emu_bits16(insn, 9, 7);
+      decoded->rs2 = 8u + rv32emu_bits16(insn, 4, 2);
+      imm = (rv32emu_bits16(insn, 6, 6) << 2) | (rv32emu_bits16(insn, 12, 10) << 3) |
+            (rv32emu_bits16(insn, 5, 5) << 6);
+      decoded->imm_s = (int32_t)imm;
+      break;
+    case 0x7: /* c.fsw -> fsw rs2', uimm(rs1') */
+      decoded->opcode = 0x27u;
       decoded->funct3 = 0x2u;
       decoded->rs1 = 8u + rv32emu_bits16(insn, 9, 7);
       decoded->rs2 = 8u + rv32emu_bits16(insn, 4, 2);
@@ -339,12 +373,38 @@ bool rv32emu_decode16(uint16_t insn, rv32emu_decoded_insn_t *decoded) {
       decoded->rs2 = rv32emu_bits16(insn, 6, 2);
       decoded->funct7 = 0x00u;
       break;
+    case 0x1: /* c.fldsp -> fld rd, uimm(x2) */
+      rd = rv32emu_bits16(insn, 11, 7);
+      if (rd == 0u) {
+        return false;
+      }
+      decoded->opcode = 0x07u;
+      decoded->rd = rd;
+      decoded->funct3 = 0x3u;
+      decoded->rs1 = 2u;
+      imm = (rv32emu_bits16(insn, 4, 2) << 6) | (rv32emu_bits16(insn, 12, 12) << 5) |
+            (rv32emu_bits16(insn, 6, 5) << 3);
+      decoded->imm_i = (int32_t)imm;
+      break;
     case 0x2: /* c.lwsp */
       rd = rv32emu_bits16(insn, 11, 7);
       if (rd == 0u) {
         return false;
       }
       decoded->opcode = 0x03u;
+      decoded->rd = rd;
+      decoded->funct3 = 0x2u;
+      decoded->rs1 = 2u;
+      imm = (rv32emu_bits16(insn, 6, 4) << 2) | (rv32emu_bits16(insn, 12, 12) << 5) |
+            (rv32emu_bits16(insn, 3, 2) << 6);
+      decoded->imm_i = (int32_t)imm;
+      break;
+    case 0x3: /* c.flwsp -> flw rd, uimm(x2) */
+      rd = rv32emu_bits16(insn, 11, 7);
+      if (rd == 0u) {
+        return false;
+      }
+      decoded->opcode = 0x07u;
       decoded->rd = rd;
       decoded->funct3 = 0x2u;
       decoded->rs1 = 2u;
@@ -404,8 +464,24 @@ bool rv32emu_decode16(uint16_t insn, rv32emu_decoded_insn_t *decoded) {
         }
       }
       break;
+    case 0x5: /* c.fsdsp -> fsd rs2, uimm(x2) */
+      decoded->opcode = 0x27u;
+      decoded->funct3 = 0x3u;
+      decoded->rs1 = 2u;
+      decoded->rs2 = rv32emu_bits16(insn, 6, 2);
+      imm = (rv32emu_bits16(insn, 12, 10) << 3) | (rv32emu_bits16(insn, 9, 7) << 6);
+      decoded->imm_s = (int32_t)imm;
+      break;
     case 0x6: /* c.swsp */
       decoded->opcode = 0x23u;
+      decoded->funct3 = 0x2u;
+      decoded->rs1 = 2u;
+      decoded->rs2 = rv32emu_bits16(insn, 6, 2);
+      imm = (rv32emu_bits16(insn, 12, 9) << 2) | (rv32emu_bits16(insn, 8, 7) << 6);
+      decoded->imm_s = (int32_t)imm;
+      break;
+    case 0x7: /* c.fswsp -> fsw rs2, uimm(x2) */
+      decoded->opcode = 0x27u;
       decoded->funct3 = 0x2u;
       decoded->rs1 = 2u;
       decoded->rs2 = rv32emu_bits16(insn, 6, 2);

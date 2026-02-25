@@ -84,11 +84,15 @@ static void rv32emu_take_trap(rv32emu_machine_t *m, uint32_t cause, uint32_t tva
   uint32_t deleg_mask;
   bool delegated_to_s = false;
   uint32_t tvec_mode;
+  rv32emu_priv_t from_priv;
+  uint32_t from_pc;
 
   if (is_interrupt) {
     cause_value |= 0x80000000u;
   }
 
+  from_priv = RV32EMU_CPU(m)->priv;
+  from_pc = RV32EMU_CPU(m)->pc;
   deleg_mask = is_interrupt ? RV32EMU_CPU(m)->csr[CSR_MIDELEG] : RV32EMU_CPU(m)->csr[CSR_MEDELEG];
   if (RV32EMU_CPU(m)->priv != RV32EMU_PRIV_M) {
     delegated_to_s = (deleg_mask & (1u << cause_bit)) != 0u;
@@ -120,6 +124,8 @@ static void rv32emu_take_trap(rv32emu_machine_t *m, uint32_t cause, uint32_t tva
       stvec_base += cause_bit * 4u;
     }
 
+    rv32emu_trace_trap(m, from_pc, from_priv, RV32EMU_PRIV_S, cause, tval, is_interrupt,
+                       delegated_to_s, stvec_base);
     RV32EMU_CPU(m)->csr[CSR_MSTATUS] = mstatus;
     RV32EMU_CPU(m)->priv = RV32EMU_PRIV_S;
     RV32EMU_CPU(m)->pc = stvec_base;
@@ -149,6 +155,8 @@ static void rv32emu_take_trap(rv32emu_machine_t *m, uint32_t cause, uint32_t tva
       mtvec_base += cause_bit * 4u;
     }
 
+    rv32emu_trace_trap(m, from_pc, from_priv, RV32EMU_PRIV_M, cause, tval, is_interrupt,
+                       delegated_to_s, mtvec_base);
     RV32EMU_CPU(m)->csr[CSR_MSTATUS] = mstatus;
     RV32EMU_CPU(m)->priv = RV32EMU_PRIV_M;
     RV32EMU_CPU(m)->pc = mtvec_base;

@@ -20,6 +20,7 @@ typedef struct {
   const char *kernel_path;
   const char *dtb_path;
   const char *initrd_path;
+  const char *trace_path;
   uint32_t opensbi_load_addr;
   uint32_t kernel_load_addr;
   uint32_t dtb_load_addr;
@@ -30,6 +31,7 @@ typedef struct {
   uint64_t max_instructions;
   bool has_fw_dynamic_info_addr;
   bool trace;
+  bool trace_mmio;
   bool boot_s_mode;
   bool sbi_shim;
   bool use_fw_dynamic;
@@ -56,6 +58,8 @@ static void usage(FILE *out, const char *prog) {
           "  --max-instr <num>           Max instructions (default 50000000)\n"
           "  --interactive               Enable stdin -> UART interactive mode\n"
           "  --trace                     Enable trace flag\n"
+          "  --trace-file <path>         Trace output path ('-' uses stderr)\n"
+          "  --trace-mmio                Include MMIO events in trace\n"
           "  -h, --help                  Show this help\n",
           prog);
 }
@@ -155,6 +159,11 @@ static bool parse_args(int argc, char **argv, cli_options_t *cli) {
       cli->trace = true;
       continue;
     }
+    if (!strcmp(arg, "--trace-mmio")) {
+      cli->trace = true;
+      cli->trace_mmio = true;
+      continue;
+    }
     if (!strcmp(arg, "--sbi-shim")) {
       cli->sbi_shim = true;
       continue;
@@ -234,6 +243,9 @@ static bool parse_args(int argc, char **argv, cli_options_t *cli) {
         fprintf(stderr, "[ERR] invalid --boot-mode: %s (use s|m)\n", val);
         return false;
       }
+    } else if (!strcmp(arg, "--trace-file")) {
+      cli->trace_path = val;
+      cli->trace = true;
     } else {
       fprintf(stderr, "[ERR] unknown option: %s\n", arg);
       return false;
@@ -401,6 +413,11 @@ int main(int argc, char **argv) {
   rv32emu_default_options(&opts);
   opts.ram_mb = cli.memory_mb;
   opts.trace = cli.trace;
+  opts.trace_path = cli.trace_path;
+  opts.trace_mask = RV32EMU_TRACE_EVT_SYSCALL | RV32EMU_TRACE_EVT_TRAP;
+  if (cli.trace_mmio) {
+    opts.trace_mask |= RV32EMU_TRACE_EVT_MMIO;
+  }
   opts.enable_sbi_shim = cli.sbi_shim;
   opts.boot_s_mode = cli.boot_s_mode;
   opts.hart_count = cli.hart_count;

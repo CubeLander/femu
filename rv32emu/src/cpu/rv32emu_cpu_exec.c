@@ -8,6 +8,12 @@
 _Thread_local rv32emu_machine_t *rv32emu_tls_machine = NULL;
 _Thread_local rv32emu_cpu_t *rv32emu_tls_cpu = NULL;
 
+#define RV32EMU_REG_A0 10u
+#define RV32EMU_REG_A1 11u
+#define RV32EMU_REG_A2 12u
+#define RV32EMU_REG_A6 16u
+#define RV32EMU_REG_A7 17u
+
 static inline uint32_t rv32emu_bits(uint32_t value, int hi, int lo) {
   return (value >> lo) & ((1u << (hi - lo + 1)) - 1u);
 }
@@ -998,12 +1004,24 @@ static bool rv32emu_exec_misc_group(rv32emu_machine_t *m, const rv32emu_decoded_
     }
     if (decoded->raw == 0x00000073u) { /* ecall */
       uint32_t cause = RV32EMU_EXC_ECALL_M;
+      uint32_t a0_in = RV32EMU_CPU(m)->x[RV32EMU_REG_A0];
+      uint32_t a1_in = RV32EMU_CPU(m)->x[RV32EMU_REG_A1];
+      uint32_t a2_in = RV32EMU_CPU(m)->x[RV32EMU_REG_A2];
+      uint32_t a6 = RV32EMU_CPU(m)->x[RV32EMU_REG_A6];
+      uint32_t a7 = RV32EMU_CPU(m)->x[RV32EMU_REG_A7];
+      bool handled;
+
       if (RV32EMU_CPU(m)->priv == RV32EMU_PRIV_S) {
         cause = RV32EMU_EXC_ECALL_S;
       } else if (RV32EMU_CPU(m)->priv == RV32EMU_PRIV_U) {
         cause = RV32EMU_EXC_ECALL_U;
       }
-      if (!rv32emu_handle_sbi_ecall(m)) {
+
+      handled = rv32emu_handle_sbi_ecall(m);
+      rv32emu_trace_syscall(m, cause, a7, a6, a0_in, a1_in, a2_in, RV32EMU_CPU(m)->x[RV32EMU_REG_A0],
+                            RV32EMU_CPU(m)->x[RV32EMU_REG_A1], handled);
+
+      if (!handled) {
         rv32emu_raise_exception(m, cause, 0);
         return false;
       }

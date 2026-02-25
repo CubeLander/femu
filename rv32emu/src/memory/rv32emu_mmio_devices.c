@@ -65,49 +65,71 @@ static bool rv32emu_handle_virtio_mmio_write(rv32emu_machine_t *m, uint32_t padd
 }
 
 bool rv32emu_mmio_read_locked(rv32emu_machine_t *m, uint32_t paddr, int len, uint32_t *out) {
+  bool ok = false;
+
   if (m == NULL || out == NULL) {
     return false;
   }
 
   if (paddr >= RV32EMU_UART_BASE && paddr < RV32EMU_UART_BASE + RV32EMU_UART_SIZE) {
-    return rv32emu_mmio_uart_read_locked(m, paddr, len, out);
+    ok = rv32emu_mmio_uart_read_locked(m, paddr, len, out);
+    rv32emu_trace_mmio(m, false, paddr, len, ok ? *out : 0u, ok);
+    return ok;
   }
 
   if (paddr >= RV32EMU_CLINT_BASE && paddr < RV32EMU_CLINT_BASE + RV32EMU_CLINT_SIZE) {
-    return rv32emu_mmio_clint_read_locked(m, paddr, len, out);
+    ok = rv32emu_mmio_clint_read_locked(m, paddr, len, out);
+    rv32emu_trace_mmio(m, false, paddr, len, ok ? *out : 0u, ok);
+    return ok;
   }
 
   if (paddr >= RV32EMU_PLIC_BASE && paddr < RV32EMU_PLIC_BASE + RV32EMU_PLIC_SIZE) {
-    return rv32emu_mmio_plic_read_locked(m, paddr, len, out);
+    ok = rv32emu_mmio_plic_read_locked(m, paddr, len, out);
+    rv32emu_trace_mmio(m, false, paddr, len, ok ? *out : 0u, ok);
+    return ok;
   }
 
   if (paddr >= VIRTIO_MMIO_BASE && paddr < VIRTIO_MMIO_BASE + VIRTIO_MMIO_SIZE) {
-    return rv32emu_handle_virtio_mmio_read(m, paddr, len, out);
+    ok = rv32emu_handle_virtio_mmio_read(m, paddr, len, out);
+    rv32emu_trace_mmio(m, false, paddr, len, ok ? *out : 0u, ok);
+    return ok;
   }
 
+  rv32emu_trace_mmio(m, false, paddr, len, 0u, false);
   return false;
 }
 
 bool rv32emu_mmio_write_locked(rv32emu_machine_t *m, uint32_t paddr, int len, uint32_t data) {
+  bool ok = false;
+
   if (m == NULL) {
     return false;
   }
 
   if (paddr >= RV32EMU_UART_BASE && paddr < RV32EMU_UART_BASE + RV32EMU_UART_SIZE) {
-    return rv32emu_mmio_uart_write_locked(m, paddr, len, data);
+    ok = rv32emu_mmio_uart_write_locked(m, paddr, len, data);
+    rv32emu_trace_mmio(m, true, paddr, len, data, ok);
+    return ok;
   }
 
   if (paddr >= RV32EMU_CLINT_BASE && paddr < RV32EMU_CLINT_BASE + RV32EMU_CLINT_SIZE) {
-    return rv32emu_mmio_clint_write_locked(m, paddr, len, data);
+    ok = rv32emu_mmio_clint_write_locked(m, paddr, len, data);
+    rv32emu_trace_mmio(m, true, paddr, len, data, ok);
+    return ok;
   }
 
   if (paddr >= RV32EMU_PLIC_BASE && paddr < RV32EMU_PLIC_BASE + RV32EMU_PLIC_SIZE) {
-    return rv32emu_mmio_plic_write_locked(m, paddr, len, data);
+    ok = rv32emu_mmio_plic_write_locked(m, paddr, len, data);
+    rv32emu_trace_mmio(m, true, paddr, len, data, ok);
+    return ok;
   }
 
   if (paddr >= VIRTIO_MMIO_BASE && paddr < VIRTIO_MMIO_BASE + VIRTIO_MMIO_SIZE) {
-    return rv32emu_handle_virtio_mmio_write(m, paddr, len, data);
+    ok = rv32emu_handle_virtio_mmio_write(m, paddr, len, data);
+    rv32emu_trace_mmio(m, true, paddr, len, data, ok);
+    return ok;
   }
 
+  rv32emu_trace_mmio(m, true, paddr, len, data, false);
   return false;
 }

@@ -147,15 +147,25 @@ enum {
   PTE_D = 1u << 7,
 };
 
+enum {
+  RV32EMU_TRACE_EVT_SYSCALL = (1u << 0),
+  RV32EMU_TRACE_EVT_TRAP = (1u << 1),
+  RV32EMU_TRACE_EVT_MMIO = (1u << 2),
+  RV32EMU_TRACE_EVT_ALL =
+      RV32EMU_TRACE_EVT_SYSCALL | RV32EMU_TRACE_EVT_TRAP | RV32EMU_TRACE_EVT_MMIO,
+};
+
 typedef struct {
   const char *kernel_path;
   const char *dtb_path;
   const char *initrd_path;
+  const char *trace_path;
   uint32_t ram_mb;
   uint32_t kernel_load_addr;
   uint32_t dtb_load_addr;
   uint32_t initrd_load_addr;
   uint32_t entry_override;
+  uint32_t trace_mask;
   bool has_entry_override;
   bool boot_s_mode;
   bool enable_sbi_shim;
@@ -194,6 +204,7 @@ typedef struct {
   uint16_t uart_rx_tail;
   uint16_t uart_rx_count;
   bool uart_tx_irq_pending;
+  void *trace_state;
 } rv32emu_platform_t;
 
 typedef struct {
@@ -437,6 +448,18 @@ bool rv32emu_load_raw(rv32emu_machine_t *m, const char *path, uint32_t load_addr
 bool rv32emu_load_elf32(rv32emu_machine_t *m, const char *path, uint32_t *entry_out);
 
 int rv32emu_run(rv32emu_machine_t *m, uint64_t max_instructions);
+
+bool rv32emu_trace_init(rv32emu_machine_t *m);
+void rv32emu_trace_close(rv32emu_machine_t *m);
+bool rv32emu_trace_event_enabled(const rv32emu_machine_t *m, uint32_t event_mask);
+void rv32emu_trace_syscall(rv32emu_machine_t *m, uint32_t cause, uint32_t a7, uint32_t a6,
+                           uint32_t a0_in, uint32_t a1_in, uint32_t a2_in, uint32_t a0_out,
+                           uint32_t a1_out, bool handled);
+void rv32emu_trace_trap(rv32emu_machine_t *m, uint32_t from_pc, rv32emu_priv_t from_priv,
+                        rv32emu_priv_t to_priv, uint32_t cause, uint32_t tval, bool is_interrupt,
+                        bool delegated_to_s, uint32_t target_pc);
+void rv32emu_trace_mmio(rv32emu_machine_t *m, bool is_write, uint32_t paddr, int len,
+                        uint32_t value, bool ok);
 
 static inline uint32_t rv32emu_sign_extend(uint32_t value, int bits) {
   const uint32_t shift = 32u - (uint32_t)bits;

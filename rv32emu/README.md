@@ -46,4 +46,27 @@ Interactive UART console (stdin -> UART RX):
   --max-instr 1200000000
 ```
 
+Trace Linux boot path:
+
+```bash
+./rv32emu/build/rv32emu \
+  --opensbi out/opensbi/platform/generic/firmware/fw_dynamic.bin \
+  --kernel out/linux/arch/riscv/boot/Image \
+  --dtb out/smoke/virt-rv32-smoke.dtb \
+  --initrd out/rootfs/initramfs.cpio.gz \
+  --max-instr 1200000000 \
+  --trace \
+  --trace-file out/trace/linux-boot.trace.log
+```
+
+Symbolize trace and print path summary:
+
+```bash
+python3 scripts/trace_linux_path.py \
+  --trace out/trace/linux-boot.trace.log \
+  --system-map out/linux/System.map \
+  --symbol-bias 0x40000000 \
+  --json-out out/trace/linux-boot.summary.json
+```
+
 See `issues/0001-comprehensive-report.md` and `docs/migration/` for migration details.

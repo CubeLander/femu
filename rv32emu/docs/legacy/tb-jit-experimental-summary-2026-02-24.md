@@ -12,9 +12,9 @@
 
 ### 2.1 `rv32emu_tb.c` 拆分（低风险机械拆分）
 
-- 将原 `rv32emu/src/tb/rv32emu_tb.c` 中 x86 JIT/TB 大段实现整体抽出到：
-  - `rv32emu/src/tb/jit/x86/rv32emu_tb_jit_x86_impl.h`
-- 在 `rv32emu/src/tb/rv32emu_tb.c` 原位置替换为：
+- 将原 `src/tb/rv32emu_tb.c` 中 x86 JIT/TB 大段实现整体抽出到：
+  - `src/tb/jit/x86/rv32emu_tb_jit_x86_impl.h`
+- 在 `src/tb/rv32emu_tb.c` 原位置替换为：
   - `#include "jit/x86/rv32emu_tb_jit_x86_impl.h"`
 - 结果：
   - `rv32emu_tb.c` 行数从 **3579** 降到 **1366**。
@@ -30,13 +30,13 @@
 
 ### 2.3 二次细分（x86 JIT 子模块）
 
-- 将 `rv32emu/src/tb/jit/x86/rv32emu_tb_jit_x86_impl.h` 进一步拆成 5 个子文件，并由聚合入口按顺序 include：
-  - `rv32emu/src/tb/jit/x86/runtime/rv32emu_tb_jit_x86_runtime_impl.h`
-  - `rv32emu/src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_flow.c`
-  - `rv32emu/src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_lowering.c`
-  - `rv32emu/src/tb/jit/x86/rv32emu_tb_jit_x86_compile.c`
-  - `rv32emu/src/tb/jit/x86/async/rv32emu_tb_jit_x86_async.c`（后续从 include 聚合迁为真实 `.c`）
-  - `rv32emu/src/tb/jit/x86/rv32emu_tb_jit_x86_fallback.c`
+- 将 `src/tb/jit/x86/rv32emu_tb_jit_x86_impl.h` 进一步拆成 5 个子文件，并由聚合入口按顺序 include：
+  - `src/tb/jit/x86/runtime/rv32emu_tb_jit_x86_runtime_impl.h`
+  - `src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_flow.c`
+  - `src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_lowering.c`
+  - `src/tb/jit/x86/rv32emu_tb_jit_x86_compile.c`
+  - `src/tb/jit/x86/async/rv32emu_tb_jit_x86_async.c`（后续从 include 聚合迁为真实 `.c`）
+  - `src/tb/jit/x86/rv32emu_tb_jit_x86_fallback.c`
 - 聚合入口保留 `#if defined(__x86_64__)` 条件编译，子文件不跨文件承载预处理分支。
 - 拆分后（阶段二）行数分布：
   - `rv32emu_tb.c`: 1366
@@ -50,11 +50,11 @@
 ### 2.4 三次细分（runtime/async 下钻）
 
 - 将 `runtime` 再细分为：
-  - `rv32emu/src/tb/jit/x86/runtime/rv32emu_tb_jit_x86_runtime_state.c`
-  - `rv32emu/src/tb/jit/x86/runtime/rv32emu_tb_jit_x86_runtime_dispatch.c`
-  - `rv32emu/src/tb/jit/x86/runtime/rv32emu_tb_jit_x86_runtime_exec.c`
+  - `src/tb/jit/x86/runtime/rv32emu_tb_jit_x86_runtime_state.c`
+  - `src/tb/jit/x86/runtime/rv32emu_tb_jit_x86_runtime_dispatch.c`
+  - `src/tb/jit/x86/runtime/rv32emu_tb_jit_x86_runtime_exec.c`
 - `async` 已完成一次 real-TU 迁移，当前为：
-  - `rv32emu/src/tb/jit/x86/async/rv32emu_tb_jit_x86_async.c`
+  - `src/tb/jit/x86/async/rv32emu_tb_jit_x86_async.c`
   - 旧 `*_async*_impl.h` 已移除
 - `runtime_state_impl.h` 已移除，`runtime_impl.h` 仅作为轻量入口占位。
 - 当前行数分布（阶段三）：
@@ -80,12 +80,12 @@
 ### 2.5 四次细分（internal 头与 lowering 子模块）
 
 - 新增私有内部头用于后续 `.c` 化拆分：
-  - `rv32emu/src/internal/tb_internal.h`
-  - `rv32emu/src/internal/tb_jit_internal.h`
+  - `src/internal/tb_internal.h`
+  - `src/internal/tb_jit_internal.h`
 - `emit_lowering` 按指令族拆为 3 个子文件，由 `emit_lowering.c` 直接编译聚合：
-  - `rv32emu/src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_lowering_alu_impl.h`
-  - `rv32emu/src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_lowering_mem_impl.h`
-  - `rv32emu/src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_lowering_cf_impl.h`
+  - `src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_lowering_alu_impl.h`
+  - `src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_lowering_mem_impl.h`
+  - `src/tb/jit/x86/emit/rv32emu_tb_jit_x86_emit_lowering_cf_impl.h`
 - 该阶段保持“零语义变化”，验证结果仍与基线一致：
   - `make -C rv32emu rv32emu` 通过
   - `make -C rv32emu test` 仍停在 `tests/test_run.c:504` 已知断言

@@ -36,20 +36,20 @@ MMIO 访问保序，不与 DRAM fast path 混淆。
 ## 4. 当前实现映射
 
 1. Threaded DRAM 原子混合路径
-`rv32emu/src/memory/rv32emu_memory_mmio.c`
+`src/memory/rv32emu_memory_mmio.c`
 
 2. LR/SC 跨 hart 失效
-`rv32emu/src/cpu/rv32emu_virt_trap.c`
+`src/cpu/rv32emu_virt_trap.c`
 
 3. AMO 原子临界区
-`rv32emu/src/cpu/rv32emu_cpu_exec.c`
+`src/cpu/rv32emu_cpu_exec.c`
 
 4. MIP 并发读写原子化
-`rv32emu/include/rv32emu.h`
-`rv32emu/src/cpu/rv32emu_csr.c`
-`rv32emu/src/memory/rv32emu_memory_mmio.c`
-`rv32emu/src/platform/rv32emu_stubs.c`
-`rv32emu/src/cpu/rv32emu_virt_trap.c`
+`include/rv32emu.h`
+`src/cpu/rv32emu_csr.c`
+`src/memory/rv32emu_memory_mmio.c`
+`src/platform/rv32emu_stubs.c`
+`src/cpu/rv32emu_virt_trap.c`
 
 ## 5. 验收清单
 
@@ -79,5 +79,5 @@ MMIO 访问保序，不与 DRAM fast path 混淆。
 字节粒度原子拼装路径（1-byte 访问与未对齐访问）。
 
 统计输出位于程序退出阶段，见：
-`rv32emu/tools/rv32emu_main.c`
+`tools/rv32emu_main.c`
 

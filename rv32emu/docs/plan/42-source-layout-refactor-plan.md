@@ -326,3 +326,14 @@ As of 2026-02-24:
    - validation remains baseline-equivalent:
      - `make -C rv32emu rv32emu` passes
      - `make -C rv32emu test` remains at the same known failure in `tests/test_run.c:504`
+23. TB private headers were layered to reduce cross-module coupling:
+   - added:
+     - `src/internal/tb_stats_internal.h`
+   - moved out from `src/internal/tb_internal.h`:
+     - `rv32emu_jit_stats_t` definition
+     - stats globals declaration
+     - stats helper macros (`RV32EMU_JIT_STATS_INC`, `RV32EMU_JIT_STATS_ADD`)
+   - `tb_internal.h` now includes `tb_stats_internal.h` and focuses on shared TB config/cache contracts
+   - validation remains baseline-equivalent:
+     - `make -C rv32emu rv32emu` passes
+     - `make -C rv32emu test` remains at the same known failure in `tests/test_run.c:504`

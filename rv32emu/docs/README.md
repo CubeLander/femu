@@ -1,6 +1,6 @@
 # Documentation Hub (Draft)
 
-This `docs/` tree is the living architecture encyclopedia for the RV32 emulator coursework project.
+This `docs/` tree is the living architecture encyclopedia for the RV32 emulator project.
 
 ## Entry Points
 
@@ -10,6 +10,8 @@ This `docs/` tree is the living architecture encyclopedia for the RV32 emulator 
 4. `docs/testing/30-test-strategy.md`: current test strategy and gap list.
 5. `docs/plan/40-agent-work-packages.md`: parallel task split for documentation agents.
 6. `docs/plan/42-source-layout-refactor-plan.md`: source tree cleanup and `.inc` removal plan.
+7. `docs/testing/33-linux-tracing-mvp.md`: Linux boot tracing capture and symbolization workflow.
+8. `docs/legacy/README.md`: earlier workspace-era implementation reports (archived).
 
 ## Recommended Reading Order
 

@@ -1,20 +1,17 @@
-# ICS2019 Programming Assignment
+# RV32 Emulator Workspace
 
-This project is the programming assignment of the class ICS(Introduction to Computer System) in Department of Computer Science and Technology, Nanjing University.
+This repository is now maintained as an independent `rv32emu` workspace.
+Legacy course-specific submit/setup flows are removed from the default workflow.
 
-For the guide of this programming assignment,
-refer to http://nju-ics.gitbooks.io/ics2019-programming-assignment/content/
+## Repository Layout
 
-To initialize, run
-```bash
-bash init.sh
-```
+* `rv32emu/` - emulator source code, unit tests, and emulator-local docs.
+* `scripts/` - top-level build/smoke orchestration scripts for Linux/OpenSBI/rootfs artifacts.
+* `out/` - generated artifacts (kernel/OpenSBI/rootfs/smoke logs).
+* `docs/` - workspace-level plans, reports, and logs.
 
-The following subprojects/components are included. Some of them are not fully implemented.
-* [NEMU](https://github.com/NJU-ProjectN/nemu)
-* [Nexus-am](https://github.com/NJU-ProjectN/nexus-am)
-* [Nanos-lite](https://github.com/NJU-ProjectN/nanos-lite)
-* [Navy-apps](https://github.com/NJU-ProjectN/navy-apps)
+See also: `docs/repo-layout.md` for the detailed layout contract.
+See also: `docs/README.md` and `scripts/README.md` for workspace responsibilities.
 
 ## Migration/Automation Additions
 
@@ -22,7 +19,7 @@ To support migration into a clean RV32 Linux emulator repository, this repo now 
 
 * `issues/0001-comprehensive-report.md` - integrated technical report
 * `docs/migration/` - dependency matrix + new-repo bootstrap guide
-* `docs/emulator/` - implementation plan for self-hosted emulator bring-up
+* `rv32emu/docs/` - emulator architecture, plans, testing docs (`legacy/` keeps earlier workspace reports)
 * `docker/Dockerfile.dev` - containerized development environment
 * `scripts/` - automated build/takeaway scripts
 
@@ -49,6 +46,10 @@ make smoke-emulator-interactive
 make smoke-emulator-smp
 make smoke-emulator-smp-linux
 make check-boot-contract
+make trace-linux-capture
+make trace-linux-summary
+make trace-linux-focus-sched
+make trace-linux-focus-net
 make rv32emu-test
 make rv32emu-bin
 make takeaway
@@ -108,3 +109,20 @@ Windows/WSL2 users should run through:
 If you are behind GFW/Clash, also see:
 
 `docs/migration/network-proxy.md`
+
+Linux trace shortcut flow:
+
+```bash
+make trace-linux-full
+make trace-linux-focus-sched
+make trace-linux-focus-net
+```
+
+Override runtime knobs when needed:
+
+```bash
+make trace-linux-capture TRACE_MAX_INSTR=800000000
+make trace-linux-summary TRACE_TOP=50 TRACE_PHASE_WINDOW=100000
+make trace-linux-summary TRACE_SYMBOL_BIAS=0x40000000
+make trace-linux-focus-sched TRACE_FOCUS_PRIV=S
+```

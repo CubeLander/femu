@@ -31,10 +31,10 @@
 3. 定义镜像加载顺序、入口点、寄存器约定（`a0=hartid`，`a1=dtb`）。
 
 验收：
-- 有一份明确的 Boot Contract 文档（可放在本文件附录或 `docs/emulator/boot-contract.md`）。
+- 有一份明确的 Boot Contract 文档（可放在本文件附录或 `docs/legacy/boot-contract.md`）。
 
 当前产出（2026-02-22）：
-1. Boot Contract 文档：`docs/emulator/boot-contract.md`
+1. Boot Contract 文档：`docs/legacy/boot-contract.md`
 2. 自动校验脚本：`scripts/check-boot-contract.sh`
 3. 统一校验入口：`make check-boot-contract`
 
@@ -49,9 +49,9 @@
 - OpenSBI 在 emulator 控制台稳定输出。
 
 当前产出（2026-02-22）：
-1. 最小平台骨架实现：`rv32emu/src/platform/rv32emu_platform.c` + `rv32emu/src/memory/rv32emu_memory_mmio.c`
+1. 最小平台骨架实现：`src/platform/rv32emu_platform.c` + `src/memory/rv32emu_memory_mmio.c`
 2. 覆盖 DRAM + UART16550 + CLINT + PLIC(minimal) 的物理访存路径。
-3. 单元自测：`rv32emu/tests/test_platform.c`
+3. 单元自测：`tests/test_platform.c`
 4. 构建/测试入口：`make rv32emu-test`
 
 ### 阶段 C：CPU/CSR/Trap 主链路
@@ -65,14 +65,14 @@
 - OpenSBI 能把控制权转交给 Linux，Linux banner 可见。
 
 当前产出（2026-02-22）：
-1. 初始 RV32 指令执行循环：`rv32emu/src/cpu/rv32emu_cpu_exec.c`
+1. 初始 RV32 指令执行循环：`src/cpu/rv32emu_cpu_exec.c`
 2. 已支持基础指令子集：`lui/auipc/jal/jalr/branch/op-imm/op/load/store/system(ecall/ebreak)`。
 3. 已支持 `SYSTEM` 关键子集：`csrrw/csrrs/csrrc/csrrwi/csrrsi/csrrci/mret/sret/wfi`。
 4. trap/中断基础路径已可触发：`illegal/misaligned/ecall/ebreak`，并支持跳转到 `mtvec/stvec`。
 5. 已实现 `sstatus/sie/sip` 到 `mstatus/mie/mip` 的别名映射，以及 pending interrupt 自动投递。
 6. 指令执行单测：
-   - `rv32emu/tests/test_run.c`（算术 + trap 停机）
-   - `rv32emu/tests/test_system.c`（CSR + mret/sret + trap-vector 往返 + interrupt trap + delegation + vectored）
+   - `tests/test_run.c`（算术 + trap 停机）
+   - `tests/test_system.c`（CSR + mret/sret + trap-vector 往返 + interrupt trap + delegation + vectored）
 
 ### 阶段 D：Sv32 MMU 与内存权限模型
 要做的事：
@@ -84,7 +84,7 @@
 - Linux 可进入 init 阶段，不在早期内存管理阶段崩溃。
 
 当前产出（2026-02-22）：
-1. 已实现 Sv32 两级页表遍历与 leaf/superpage 检查：`rv32emu/src/cpu/rv32emu_virt_trap.c`
+1. 已实现 Sv32 两级页表遍历与 leaf/superpage 检查：`src/cpu/rv32emu_virt_trap.c`
 2. 已实现权限模型：
    - `U/S` 页访问检查
    - `SUM/MXR` 行为
@@ -92,10 +92,10 @@
 4. `satp` 语义已接入：
    - `M` 模式直通（不翻译）
    - `S/U + MODE=Sv32` 启用地址翻译
-5. `sfence.vma` 最小语义已接入（S/M 可执行 no-op，U 触发 illegal）：`rv32emu/src/cpu/rv32emu_cpu_exec.c`
+5. `sfence.vma` 最小语义已接入（S/M 可执行 no-op，U 触发 illegal）：`src/cpu/rv32emu_cpu_exec.c`
 6. 新增测试覆盖：
-   - `rv32emu/tests/test_system.c`：Sv32 翻译、权限 fault、A/D、`sfence.vma`
-   - `rv32emu/tests/test_platform.c`：更新 satp 在 M 模式下的直通断言
+   - `tests/test_system.c`：Sv32 翻译、权限 fault、A/D、`sfence.vma`
+   - `tests/test_platform.c`：更新 satp 在 M 模式下的直通断言
 
 ### 阶段 E：OpenSBI 对接与 DTB
 要做的事：
@@ -107,18 +107,18 @@
 - `OpenSBI banner + Linux cmdline` 关键标记稳定出现。
 
 当前产出（2026-02-22）：
-1. SBI shim 最小闭环：`rv32emu/src/platform/rv32emu_stubs.c`
+1. SBI shim 最小闭环：`src/platform/rv32emu_stubs.c`
    - 已支持 legacy `set_timer/console/shutdown`。
    - 已支持 v0.2 `BASE/TIME/IPI/RFENCE/HSM/SRST` 的最小返回语义（单核 no-op/受限实现）。
-2. ecall 执行路径打通：`rv32emu/src/cpu/rv32emu_cpu_exec.c`
+2. ecall 执行路径打通：`src/cpu/rv32emu_cpu_exec.c`
    - 在 `enable_sbi_shim=true` 下，`ecall` 被 SBI 处理后可正常退休并前进到下一条指令。
-3. 镜像加载器最小可用：`rv32emu/src/platform/rv32emu_stubs.c`
+3. 镜像加载器最小可用：`src/platform/rv32emu_stubs.c`
    - `rv32emu_load_raw`
    - `rv32emu_load_elf32`
    - `rv32emu_load_image_auto`（ELF32 自动识别）
 4. 新增覆盖测试：
-   - `rv32emu/tests/test_system.c`：SBI handle + ecall 前进路径
-   - `rv32emu/tests/test_loader.c`：raw/ELF32/auto loader
+   - `tests/test_system.c`：SBI handle + ecall 前进路径
+   - `tests/test_loader.c`：raw/ELF32/auto loader
 
 ### 阶段 F：rootfs 集成与 smoke 自动化
 要做的事：
@@ -130,7 +130,7 @@
 - strict smoke pass：进入 `/bin/sh` 且无 panic/error-8/illegal instruction。
 
 当前产出（2026-02-22）：
-1. emulator 运行主程序：`rv32emu/tools/rv32emu_main.c`
+1. emulator 运行主程序：`tools/rv32emu_main.c`
    - 可加载 OpenSBI/Linux/DTB/initramfs 并设置 RV32 启动寄存器。
    - 支持 `FW_DYNAMIC` 信息结构注入（`a2`）。
 2. 第一版端到端脚本：`scripts/smoke-emulator.sh`

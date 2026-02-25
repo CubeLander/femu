@@ -1,5 +1,6 @@
 #include "rv32emu.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -110,6 +111,14 @@ bool rv32emu_platform_init(rv32emu_machine_t *m, const rv32emu_options_t *opts) 
     cpu->timer_batch_ticks = 0u;
   }
 
+  if (!rv32emu_trace_init(m)) {
+    m->opts.trace = false;
+    for (hart = 0u; hart < m->hart_count; hart++) {
+      m->harts[hart].trace = false;
+    }
+    fprintf(stderr, "[WARN] tracing disabled due to init failure\n");
+  }
+
   return true;
 }
 
@@ -118,6 +127,7 @@ void rv32emu_platform_destroy(rv32emu_machine_t *m) {
     return;
   }
 
+  rv32emu_trace_close(m);
   free(m->plat.dram);
   m->plat.dram = NULL;
   m->plat.dram_size = 0;

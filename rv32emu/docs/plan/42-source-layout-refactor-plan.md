@@ -301,3 +301,28 @@ As of 2026-02-24:
    - validation remains baseline-equivalent:
      - `make -C rv32emu rv32emu` passes
      - `make -C rv32emu test` remains at the same known failure in `tests/test_run.c:504`
+21. TB cache/core path was split out from `rv32emu_tb.c`:
+   - added:
+     - `src/tb/rv32emu_tb_cache_core.c`
+   - moved out from `rv32emu_tb.c`:
+     - cache indexing/lookup/victim selection
+     - TB line build + lookup-or-build flow
+     - cache reset initialization path
+   - internal API promoted for cross-TU reuse:
+     - `rv32emu_tb_lookup_or_build` declared in `src/internal/tb_internal.h`
+   - size effect:
+     - `src/tb/rv32emu_tb.c` reduced further to ~587 LOC
+   - validation remains baseline-equivalent:
+     - `make -C rv32emu rv32emu` passes
+     - `make -C rv32emu test` remains at the same known failure in `tests/test_run.c:504`
+22. TB execution paths were split out from `rv32emu_tb.c`:
+   - added:
+     - `src/tb/rv32emu_tb_exec_paths.c`
+   - moved out from `rv32emu_tb.c`:
+     - JIT dispatch/readiness paths
+     - chain-next runtime integration
+     - public exec entry points (`rv32emu_exec_tb_jit`, `rv32emu_exec_tb_block`, `rv32emu_exec_one_tb`)
+   - `src/tb/rv32emu_tb.c` is now a minimal translation-unit placeholder to keep file identity stable
+   - validation remains baseline-equivalent:
+     - `make -C rv32emu rv32emu` passes
+     - `make -C rv32emu test` remains at the same known failure in `tests/test_run.c:504`

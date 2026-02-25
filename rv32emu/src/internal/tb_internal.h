@@ -115,5 +115,7 @@ uint8_t rv32emu_tb_jit_async_hot_bonus_from_env(void);
 
 uint32_t rv32emu_tb_next_jit_generation(void);
 rv32emu_tb_line_t *rv32emu_tb_find_cached_line(rv32emu_tb_cache_t *cache, uint32_t pc);
+rv32emu_tb_line_t *rv32emu_tb_lookup_or_build(rv32emu_machine_t *m, rv32emu_tb_cache_t *cache,
+                                              uint32_t pc);
 
 #endif
